@@ -1,0 +1,114 @@
+{
+  "changes": {
+    "files": [],
+    "files_changed": 0,
+    "lines_added": 0,
+    "lines_removed": 0
+  },
+  "dependencies": [],
+  "deprecated_patterns": {
+    "fixed": [],
+    "found": [],
+    "remaining": []
+  },
+  "manual_follow_ups": [
+    "Review the generated diff and commit history before merging."
+  ],
+  "metrics": {
+    "agent_calls": {
+      "analysis": 1,
+      "planning": 2,
+      "repair": 1,
+      "transformation": 2
+    },
+    "files_changed": 2,
+    "lines_added": 2,
+    "lines_removed": 2,
+    "tokens_in": 0,
+    "tokens_out": 0,
+    "wall_clock_s": 0.16261620000295807
+  },
+  "objective": "Modernize dependency",
+  "outcome": {
+    "stage": "REPORT",
+    "status": "SUCCESS"
+  },
+  "plan": {
+    "rationale": "The first plan missed the compatibility layer.",
+    "steps": [
+      {
+        "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "depends_on": [],
+        "description": "Update the declared dependency.",
+        "files": [
+          "requirements.txt"
+        ],
+        "id": "S1",
+        "kind": "dependency",
+        "status": "applied",
+        "title": "Modernize dependency",
+        "validation_hint": "Tests pass."
+      }
+    ],
+    "version": 2
+  },
+  "repairs": [
+    {
+      "commit_sha": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "diagnosis": "Repair fixture regression",
+      "failing_after": 0,
+      "failing_before": 0,
+      "files_changed": [
+        "requirements.txt"
+      ],
+      "iteration": 1,
+      "root_cause_category": "api_change"
+    }
+  ],
+  "replans": 1,
+  "reproduction": {
+    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "best_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "budgets": {
+      "max_no_progress": 1,
+      "max_repairs": 5,
+      "max_replans": 1,
+      "max_tokens": 500000,
+      "max_wall_clock_s": 1800
+    },
+    "repo_source": "https://example.invalid/legacy.git",
+    "work_branch": "reforge/run-001",
+    "workspace": "C:\\D\\ReForge\\reforge\\backend\\tests\\fixtures\\dependency_repo"
+  },
+  "run_id": "workflow-replan",
+  "tests": {
+    "baseline": {
+      "duration_s": 0.01,
+      "errored": 0,
+      "failed": 0,
+      "generated_tests": false,
+      "install_ok": true,
+      "lint_issues": 0,
+      "passed": 1,
+      "phase": "baseline",
+      "skipped": 0,
+      "typecheck_errors": null
+    },
+    "baseline_pass_set": [
+      "tests/test_legacy.py::test_behavior"
+    ],
+    "final": {
+      "duration_s": 0.01,
+      "errored": 0,
+      "failed": 0,
+      "generated_tests": false,
+      "install_ok": true,
+      "lint_issues": 0,
+      "passed": 1,
+      "phase": "post_transform",
+      "skipped": 0,
+      "typecheck_errors": null
+    }
+  },
+  "unresolved_issues": []
+}

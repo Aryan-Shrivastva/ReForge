@@ -151,6 +151,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -207,6 +209,27 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+.pytest-tmp/
+pytest-*/
+.reforge-artifacts/
+.reforge-crewai/
+.reforge-crewai-*/
+.crewai-state/
+.pip-temp/
+pytest-cache-files-*/
+.m4-live/
+.m5-live/
+.m5-runs/
+.m6-live/
+.m6-runs/
+.workflow-test-runs/
+.workflow-test-workspaces/
+.api-test-runs/
+benchmark-runs/
+runs/
+.report-test/
+dashboard/node_modules/
+dashboard/dist/
 
 # PyPI configuration file
 .pypirc

@@ -1,0 +1,11 @@
+name: flask-legacy-app
+objective: Upgrade Flask 1.x to 3.x and remove deprecated APIs
+ground_truth:
+  deprecated_patterns:
+    - rule_id: flask-escape
+      file: app.py
+      line: 1
+  target_dependencies:
+    flask: ">=3.0"
+success: baseline_pass_set passes after modernization
+has_tests: true

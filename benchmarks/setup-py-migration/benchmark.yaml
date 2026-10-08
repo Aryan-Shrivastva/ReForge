@@ -1,0 +1,10 @@
+name: setup-py-migration
+objective: Move legacy setup.py packaging metadata to pyproject.toml
+ground_truth:
+  deprecated_patterns:
+    - rule_id: distutils-module
+      file: setup.py
+      line: 1
+  target_dependencies: {}
+success: baseline_pass_set passes after modernization
+has_tests: true

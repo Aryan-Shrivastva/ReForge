@@ -1,0 +1,13 @@
+name: stdlib-deprecations
+objective: Replace deprecated standard-library imports and event-loop usage
+ground_truth:
+  deprecated_patterns:
+    - rule_id: collections-mapping
+      file: legacy.py
+      line: 1
+    - rule_id: asyncio-get-event-loop
+      file: legacy.py
+      line: 10
+  target_dependencies: {}
+success: baseline_pass_set passes after modernization
+has_tests: true

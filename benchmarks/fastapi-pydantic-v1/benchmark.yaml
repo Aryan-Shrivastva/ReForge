@@ -1,0 +1,12 @@
+name: fastapi-pydantic-v1
+objective: Upgrade FastAPI and Pydantic v1 code to Pydantic v2
+ground_truth:
+  deprecated_patterns:
+    - rule_id: pydantic-dict
+      file: models.py
+      line: 9
+  target_dependencies:
+    fastapi: ">=0.110"
+    pydantic: ">=2.0"
+success: baseline_pass_set passes after modernization
+has_tests: true

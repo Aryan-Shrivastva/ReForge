@@ -1,0 +1,10 @@
+.git
+.venv
+**/.venv
+dashboard/node_modules
+dashboard/dist
+runs
+benchmark-runs
+.env
+__pycache__
+*.pyc

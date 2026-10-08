@@ -1,0 +1,10 @@
+name: no-tests-characterization
+objective: Replace deprecated imp usage while preserving current public behavior
+ground_truth:
+  deprecated_patterns:
+    - rule_id: imp-module
+      file: loader.py
+      line: 1
+  target_dependencies: {}
+success: generated baseline behavior tests pass after modernization
+has_tests: false

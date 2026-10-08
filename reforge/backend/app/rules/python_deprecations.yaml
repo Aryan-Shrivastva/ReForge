@@ -1,0 +1,38 @@
+rules:
+  - id: flask-escape
+    kind: from_import
+    module: flask
+    name: escape
+    replacement_hint: "Import escape from markupsafe instead."
+  - id: flask-jsonencoder
+    kind: from_import
+    module: flask.json
+    name: JSONEncoder
+    replacement_hint: "Use a Flask JSON provider instead of JSONEncoder."
+  - id: collections-mapping
+    kind: from_import
+    module: collections
+    name: Mapping
+    replacement_hint: "Import Mapping from collections.abc."
+  - id: imp-module
+    kind: import
+    name: imp
+    replacement_hint: "Use importlib instead of imp."
+  - id: distutils-module
+    kind: import
+    name: distutils
+    replacement_hint: "Use setuptools or packaging instead of distutils."
+  - id: asyncio-get-event-loop
+    kind: attribute
+    module: asyncio
+    name: get_event_loop
+    replacement_hint: "Use asyncio.get_running_loop in coroutine code or asyncio.run at the boundary."
+  - id: fastapi-on-event
+    kind: attribute
+    module: app
+    name: on_event
+    replacement_hint: "Replace startup/shutdown events with a FastAPI lifespan handler."
+  - id: pydantic-dict
+    kind: attribute
+    name: dict
+    replacement_hint: "Use model_dump() with Pydantic v2 models."

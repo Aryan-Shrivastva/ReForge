@@ -1,0 +1,5 @@
+[project]
+dependencies = ["pydantic>=1.10", "fastapi>=0.95"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
