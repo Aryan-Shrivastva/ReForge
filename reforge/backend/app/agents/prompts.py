@@ -8,9 +8,11 @@ Evidence: {evidence}
 Schema: {schema}
 """
 
-PLANNING_PROMPT = """You are ReForge's Planning Agent. Produce a small, ordered modernization plan.
-Use dependency/config updates before codemods, API replacements, and refactors. Do not invent files outside
-the supplied workspace inventory. Step dependencies must form an acyclic DAG. Return only one JSON object
+PLANNING_PROMPT = """You are ReForge's Planning Agent. Produce a small, ordered modernization plan grounded in the analysis evidence.
+Do not propose dependency versioning when deterministic evidence already supplies a version constraint, and do not
+propose a generic "upgrade to latest" configuration edit without a concrete detected compatibility or deprecation finding.
+Use dependency/config updates before codemods, API replacements, and refactors only when the evidence requires them.
+Do not invent files outside the supplied workspace inventory. Step dependencies must form an acyclic DAG. Return only one JSON object
 matching the supplied Plan schema.
 Objective: {objective}
 Analysis: {analysis}
@@ -32,8 +34,10 @@ Schema: {schema}
 
 TRANSFORMATION_PROMPT = """You are ReForge's Transformation Agent. Propose the smallest safe change for one plan step.
 You may only modify the declared files; never modify tests or test configuration. Return a JSON
-TransformationProposal. Each manual patch must be a clean unified diff with a/ and b/ paths. Prefer the
-listed deterministic codemod when it exactly fits; otherwise use patches. Do not include Markdown fences.
+TransformationProposal. Each manual patch must be a clean unified diff with a/ and b/ paths. Its hunk context
+must copy the supplied target file contents exactly: never guess missing files, lines, versions, or a version
+catalog. If the evidence does not support a safe edit, return no patches with codemod "none" and explain why.
+Prefer the listed deterministic codemod when it exactly fits; otherwise use patches. Do not include Markdown fences.
 Objective: {objective}
 Plan step: {step}
 Protected test files: {protected_test_files}

@@ -1,4 +1,4 @@
-"""Deterministic test execution and pytest-json-report parsing.
+"""Deterministic test execution for Python and npm projects.
 
 The runner makes no LLM decisions. The optional baseline test generator is a
 later M6 concern; M1 establishes the runner it will use.
@@ -42,7 +42,9 @@ class TestRunner:
         install_command: str | None = None,
         recreate_venv: bool = False,
     ) -> TestReport:
-        """Return a typed report from install, pytest, ruff, and optional mypy."""
+        """Return a typed report from the repository's detected native toolchain."""
+        if self._is_node_project():
+            return self._run_node_project(phase, recreate_dependencies=recreate_venv)
         started = monotonic()
         artifact = self.workspace / _ARTIFACT_PATH
         artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -106,6 +108,60 @@ class TestRunner:
         report.duration_s = monotonic() - started
         return report
 
+    def _run_node_project(
+        self,
+        phase: Literal["baseline", "post_transform", "post_repair"],
+        *,
+        recreate_dependencies: bool,
+    ) -> TestReport:
+        """Run npm's test script, or a build check when no test script exists.
+
+        A successful build is deliberately labelled as a build check, not a
+        test suite.  This avoids manufacturing Python file-presence checks for
+        a JavaScript/TypeScript repository.
+        """
+        started = monotonic()
+        install = self.sandbox.run(
+            ["/bin/sh", "-lc", self.node_install_command(recreate_dependencies)],
+            phase="install",
+            timeout=self.timeout_s,
+        )
+        if install.exit_code != 0 or install.timed_out:
+            return TestReport(
+                phase=phase,
+                install_ok=False,
+                install_log_tail=self._tail(install),
+                duration_s=monotonic() - started,
+            )
+        has_test_script = self._package_has_script("test")
+        command = "npm run test" if has_test_script else "npm run build"
+        check = self.sandbox.run(["/bin/sh", "-lc", command], phase="run", timeout=self.timeout_s)
+        passed = ["<npm-test>"] if has_test_script and check.exit_code == 0 else ["<npm-build>"] if check.exit_code == 0 else []
+        failed = []
+        if check.exit_code != 0 or check.timed_out:
+            failed.append(
+                Failure(
+                    test_id="<npm-test>" if has_test_script else "<npm-build>",
+                    error_type="RunnerError",
+                    message="npm test command failed" if has_test_script else "npm build check failed",
+                    traceback_excerpt=self._tail(check),
+                    file="package.json",
+                )
+            )
+        return TestReport(
+            phase=phase,
+            install_ok=True,
+            install_log_tail=self._tail(install),
+            passed=passed,
+            failed=failed,
+            duration_s=monotonic() - started,
+            # The native test/build command is the baseline gate. Running an
+            # additional lint script here repeats a full project traversal,
+            # often after a build has already failed, and can double live-demo
+            # time without providing another behavior-preservation signal.
+            lint_issues=None,
+        )
+
     @staticmethod
     def default_install_command(recreate_venv: bool = False) -> str:
         """Create a persistent venv, or cleanly rebuild it after dependency changes."""
@@ -116,6 +172,23 @@ class TestRunner:
             "if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then .venv/bin/pip install -e .; fi",
         ]
         return " && ".join(commands)
+
+    def node_install_command(self, recreate_dependencies: bool = False) -> str:
+        installer = "npm ci --no-audit --no-fund" if (self.workspace / "package-lock.json").is_file() else "npm install --no-audit --no-fund"
+        if recreate_dependencies:
+            return f"rm -rf node_modules && {installer}"
+        return f"if [ ! -d node_modules ]; then {installer}; fi"
+
+    def _is_node_project(self) -> bool:
+        return (self.workspace / "package.json").is_file()
+
+    def _package_has_script(self, name: str) -> bool:
+        try:
+            package = json.loads((self.workspace / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+        return isinstance(scripts, dict) and isinstance(scripts.get(name), str)
 
     @staticmethod
     def pytest_command() -> str:

@@ -66,10 +66,31 @@ def test_analysis_agent_retries_invalid_json() -> None:
 
     report = AnalysisAgent(llm).run("Upgrade dependencies", evidence)
 
-    assert report.summary == "A valid fake analysis."
+    assert report.summary.startswith("A valid fake analysis.")
     assert len(llm.prompts) == 2
     assert "previous response was invalid" in llm.prompts[1]
     assert "parse_dependencies" in AnalysisAgent.tool_names
+
+
+def test_analysis_evidence_keeps_gradle_dependencies_and_android_rules_visible(tmp_path: Path) -> None:
+    (tmp_path / "app" / "src" / "main" / "java").mkdir(parents=True)
+    (tmp_path / "app" / "build.gradle.kts").write_text(
+        'dependencies { implementation("com.nineoldandroids:library:2.4.0") }\n',
+        encoding="utf-8",
+    )
+    source = tmp_path / "app" / "src" / "main" / "java" / "LegacyActivity.java"
+    source.write_text("void pick() { startActivityForResult(intent, 1); }\n", encoding="utf-8")
+    catalog = RuleCatalog.from_yaml(Path("reforge/backend/app/rules/python_deprecations.yaml"))
+    evidence = collect_analysis_evidence(tmp_path, catalog)
+    payload = analysis_payload()
+    payload["tests"] = {"framework": None, "test_files": [], "test_count": 0, "has_tests": False}
+
+    report = AnalysisAgent(FakeLLM([json.dumps(payload)])).run("Modernize Android", evidence)
+
+    dependency = next(item for item in report.dependencies if item.name == "com.nineoldandroids:library")
+    assert dependency.current == "2.4.0"
+    assert dependency.status == "deprecated"
+    assert any(item.rule_id == "ANDROID-ACTIVITY-RESULTS" for item in report.deprecated_patterns)
 
 
 def test_planning_agent_retries_a_cyclic_plan() -> None:

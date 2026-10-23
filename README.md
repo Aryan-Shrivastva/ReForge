@@ -69,6 +69,21 @@ otherwise read-only, CPU/memory/PID-limited sandbox* so that the sandbox can
 write its per-run virtual environment. Direct local Docker runs keep the
 specification's default unprivileged `reforge` user.
 
+## Sandbox security boundary
+
+Each target command receives a disposable container with a read-only root
+filesystem, temporary writable storage, CPU, memory, and process limits, all
+Linux capabilities dropped, and `no-new-privileges` enabled. Test and lint
+commands have no network access; only the dependency-install phase may access
+the package network. The `REFORGE_SANDBOX_ROOT_FALLBACK=true` Compose setting
+is a logged Windows bind-mount compatibility exception, not the default.
+
+The backend mounts the Docker socket so it can create these disposable
+containers. Docker-socket access is effectively high privilege on the host;
+run the Compose stack only on a trusted local machine and only process target
+repositories you are prepared to inspect in this boundary. Do not expose the
+backend or its Docker socket to an untrusted network.
+
 ## Reproducible demo
 
 With the Compose stack running, launch one controlled benchmark run:

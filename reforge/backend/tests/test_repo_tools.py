@@ -24,6 +24,17 @@ def test_lists_reads_and_searches_workspace_files() -> None:
     ]
 
 
+def test_list_tree_ignores_node_modules(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.ts").write_text("export {}\n", encoding="utf-8")
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin" / "tool").write_text("generated\n", encoding="utf-8")
+
+    files = RepositoryTools(tmp_path).list_tree()
+
+    assert files == ["src/main.ts"]
+
+
 def test_rejects_workspace_escape() -> None:
     tools = RepositoryTools(FIXTURE_WORKSPACE)
 

@@ -17,9 +17,10 @@ services:
       # Set REFORGE_DOCKER_HOST_RUNS_ROOT to your absolute host runs path when
       # using Docker Desktop; this lets the sibling sandbox mount each run.
       REFORGE_DOCKER_HOST_RUNS_ROOT: ${REFORGE_DOCKER_HOST_RUNS_ROOT:-}
-      # Docker Desktop bind mounts on Windows deny writes from the image's
-      # unprivileged UID. Root is confined to the read-only sandbox container.
-      REFORGE_SANDBOX_USER: "0"
+      # Docker Desktop bind mounts on some Windows hosts deny writes from the
+      # image's unprivileged UID. This explicit, logged compatibility fallback
+      # keeps root confined to the otherwise hardened sandbox container.
+      REFORGE_SANDBOX_ROOT_FALLBACK: "true"
     ports:
       - "8000:8000"
     volumes:

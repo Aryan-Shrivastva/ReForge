@@ -33,6 +33,10 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        # Local development may use a fallback Vite port when 5173 is occupied
+        # or reserved by Windows.  Keep this limited to loopback origins rather
+        # than opening the API to arbitrary browser hosts.
+        allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],

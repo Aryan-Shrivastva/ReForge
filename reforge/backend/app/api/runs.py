@@ -21,12 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..core.config import Settings
 from ..core.events import RunStateStore, TraceRecorder
 from ..core.state import FinalStatus, ProjectState, Stage
-from ..core.workflow import WorkflowRunner
+from ..core.workflow import DISCOVERY_OBJECTIVE, WorkflowRunner
 from ..evaluation import BenchmarkCatalog, BenchmarkRunner, DEFAULT_ABLATIONS, EvaluationSummary
 
-DEFAULT_DISCOVERY_OBJECTIVE = (
-    "Analyze this repository, identify safe modernization opportunities, and propose a prioritized plan."
-)
+DEFAULT_DISCOVERY_OBJECTIVE = DISCOVERY_OBJECTIVE
 
 
 class RunCreateRequest(BaseModel):

@@ -26,13 +26,19 @@ from ..core.state import (
     TestReport,
 )
 from ..reporting import ReportGenerator
-from ..tools.ast_tools import RuleCatalog, scan_deprecated_patterns
+from ..tools.ast_tools import RuleCatalog, scan_android_deprecated_patterns, scan_deprecated_patterns
 from ..tools.codemod_tools import CodemodTools
 from ..tools.git_tools import GitTools
 from ..tools.repo_tools import RepositoryTools
 from ..tools.sandbox import DockerSandbox
 from .events import RunStateStore, TraceRecorder
 from .orchestrator import Orchestrator, TransitionSignal
+
+
+DISCOVERY_OBJECTIVE = (
+    "Analyze this repository, identify safe modernization opportunities, and propose a prioritized plan."
+)
+MAX_INFERRED_OBJECTIVE_LENGTH = 320
 
 
 class TestingRunner(Protocol):
@@ -127,10 +133,13 @@ class WorkflowRunner:
     ) -> ProjectState:
         """Create the per-run branch and persisted INIT state for an existing Git workspace."""
         git = self.git_factory(workspace)
+        submitted_objective = objective.strip()
+        discovery_requested = not submitted_objective or submitted_objective == DISCOVERY_OBJECTIVE
         state = ProjectState(
             run_id=run_id,
             repo_source=repo_source,
-            objective=objective,
+            objective=DISCOVERY_OBJECTIVE if discovery_requested else submitted_objective,
+            objective_origin="discovery" if discovery_requested else "user",
             workspace_path=str(workspace.resolve()),
             work_branch=f"reforge/{run_id}",
             base_commit=git.current_commit(),
@@ -160,6 +169,16 @@ class WorkflowRunner:
                     state.analysis = self._agent_call(
                         state, "analysis", lambda: self.analysis_agent.run(state.objective, evidence)
                     )
+                    if state.objective_origin == "discovery":
+                        state.objective = self._infer_objective(state.analysis)
+                        state.objective_origin = "inferred"
+                        self._record(
+                            state,
+                            "orchestrator",
+                            "decision",
+                            "Inferred a bounded modernization objective from deterministic analysis findings.",
+                            {"objective": state.objective},
+                        )
                     self._transition(state, TransitionSignal.ANALYSIS_VALID, "Analysis report validated.")
                 elif state.stage is Stage.PLAN:
                     assert state.analysis is not None
@@ -179,7 +198,13 @@ class WorkflowRunner:
                     if guards is None:
                         guards = self._make_guards(state)
                     self._apply_plan(state, workspace, guards)
-                    self._transition(state, TransitionSignal.TRANSFORM_COMPLETE, "All independent plan steps attempted.")
+                    if not any(step.status == "applied" for step in state.plan.steps):
+                        self._report_partial(
+                            state,
+                            "No planned modernization step could be applied; baseline behavior was preserved but no code change was produced.",
+                        )
+                    else:
+                        self._transition(state, TransitionSignal.TRANSFORM_COMPLETE, "All independent plan steps attempted.")
                 elif state.stage is Stage.TEST:
                     phase = "post_repair" if state.repairs and state.repairs[-1].failing_after is None else "post_transform"
                     report = self._run_tests(state, workspace, phase)
@@ -190,7 +215,12 @@ class WorkflowRunner:
                         )
                         if state.repairs[-1].failing_after < state.repairs[-1].failing_before:
                             state.best_commit = self.git_factory(workspace).current_commit()
-                    if self._meets_success_criteria(state, report, workspace):
+                    if self._has_unapplied_plan_steps(state):
+                        self._report_partial(
+                            state,
+                            "Some planned modernization steps were not applied; baseline verification passed, but the run is incomplete.",
+                        )
+                    elif self._meets_success_criteria(state, report, workspace):
                         self._transition(state, TransitionSignal.TEST_PASSED, "All M6 success criteria met.")
                     else:
                         self._route_test_failure(state)
@@ -261,9 +291,7 @@ class WorkflowRunner:
             state.analysis is None
             or not state.analysis.tests.has_tests
             or len(report.passed) < self.min_baseline_passing_tests
-        ):
-            if self.test_generator is None:
-                raise WorkflowError("baseline needs characterization tests but no test generator is configured")
+        ) and self.test_generator is not None and self.test_generator.supports(workspace):
             for attempt in range(2):
                 proposal = self._agent_call(
                     state,
@@ -311,6 +339,21 @@ class WorkflowRunner:
         assert state.plan is not None
         codemods = self.codemod_factory(workspace) if self.enable_codemods and self.codemod_factory else None
         for step in self._ordered_steps(state.plan):
+            blocked_by = [
+                dependency
+                for dependency in step.depends_on
+                if next(item for item in state.plan.steps if item.id == dependency).status != "applied"
+            ]
+            if blocked_by:
+                step.status = "skipped"
+                self._record(
+                    state,
+                    "transformation",
+                    "decision",
+                    f"{step.id} skipped because prerequisite step(s) did not apply.",
+                    {"blocked_by": blocked_by},
+                )
+                continue
             result = self._agent_call(
                 state,
                 "transformation",
@@ -392,6 +435,38 @@ class WorkflowRunner:
         )
 
     @staticmethod
+    def _infer_objective(analysis: AnalysisReport) -> str:
+        """Produce a small, auditable objective without asking an LLM to route work.
+
+        Discovery requests intentionally begin broad. Once the analyst has
+        validated evidence, planning receives this deterministic description of
+        the highest-confidence work instead of an empty or unbounded request.
+        """
+        upgrade_targets = [
+            finding
+            for finding in analysis.dependencies
+            if finding.status in {"outdated", "deprecated", "incompatible"} and finding.target
+        ]
+        if upgrade_targets:
+            rendered = ", ".join(
+                f"{item.name} to {item.target}" for item in upgrade_targets[:3]
+            )
+            objective = f"Upgrade and validate {rendered}; resolve the associated compatibility findings."
+        elif analysis.deprecated_patterns:
+            rules = ", ".join(sorted({item.rule_id for item in analysis.deprecated_patterns})[:3])
+            objective = f"Replace the detected deprecated API patterns ({rules}) and validate preserved behavior."
+        elif analysis.python_version_target:
+            objective = (
+                f"Modernize compatibility for Python {analysis.python_version_target} and validate preserved behavior."
+            )
+        else:
+            objective = (
+                "Modernize the repository's highest-confidence compatibility and maintenance findings "
+                "while preserving the baseline test behavior."
+            )
+        return objective[:MAX_INFERRED_OBJECTIVE_LENGTH].rstrip()
+
+    @staticmethod
     def _consecutive_no_progress(state: ProjectState) -> int:
         count = 0
         for repair in reversed(state.repairs):
@@ -412,7 +487,12 @@ class WorkflowRunner:
     def _run_tests(self, state: ProjectState, workspace: Path, phase: str) -> TestReport:
         self._record(state, "testing", "start", f"{phase} test run started.")
         runner = self.testing_runner_factory(workspace)
-        report = runner.run(phase, recreate_venv=phase != "baseline")
+        dependency_changed = bool(
+            phase != "baseline"
+            and state.plan
+            and any(step.status == "applied" and step.kind == "dependency" for step in state.plan.steps)
+        )
+        report = runner.run(phase, recreate_venv=dependency_changed)
         self._record(
             state,
             "testing",
@@ -478,6 +558,8 @@ class WorkflowRunner:
         baseline = state.baseline
         if baseline is None or not report.install_ok:
             return False
+        if self._has_unapplied_plan_steps(state):
+            return False
         if not set(state.baseline_pass_set).issubset(report.passed):
             return False
         if report.errored:
@@ -488,8 +570,15 @@ class WorkflowRunner:
         if baseline.typecheck_errors is not None and report.typecheck_errors is not None:
             if report.typecheck_errors > baseline.typecheck_errors:
                 return False
-        remaining = scan_deprecated_patterns(workspace.resolve(), self.catalog)
+        remaining = [
+            *scan_deprecated_patterns(workspace.resolve(), self.catalog),
+            *scan_android_deprecated_patterns(workspace.resolve()),
+        ]
         return not remaining
+
+    @staticmethod
+    def _has_unapplied_plan_steps(state: ProjectState) -> bool:
+        return bool(state.plan and any(step.status != "applied" for step in state.plan.steps))
 
     def _check_budget(self, state: ProjectState, started: float) -> None:
         if self.cancel_checker is not None and self.cancel_checker(state.run_id):
@@ -505,3 +594,8 @@ class WorkflowRunner:
         state.stage = Stage.REPORT
         state.final_status = FinalStatus.FAILED
         self._record(state, "orchestrator", "error", summary)
+
+    def _report_partial(self, state: ProjectState, summary: str) -> None:
+        state.stage = Stage.REPORT
+        state.final_status = FinalStatus.PARTIAL
+        self._record(state, "orchestrator", "decision", summary)

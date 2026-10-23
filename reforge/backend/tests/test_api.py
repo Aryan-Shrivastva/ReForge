@@ -96,6 +96,15 @@ def test_post_run_is_background_and_exposes_persisted_state_and_sse() -> None:
     assert client.get("/runs").status_code == 200
 
 
+def test_api_allows_loopback_dashboard_on_a_fallback_development_port() -> None:
+    client = TestClient(create_app(service=fake_service()))
+
+    response = client.get("/health", headers={"Origin": "http://127.0.0.1:5175"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5175"
+
+
 def test_run_uses_agent_led_discovery_when_no_objective_is_provided() -> None:
     service = fake_service()
     client = TestClient(create_app(service=service))

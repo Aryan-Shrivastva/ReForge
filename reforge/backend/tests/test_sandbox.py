@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from reforge.backend.app.tools.sandbox import DockerSandbox, DockerUnavailable
+from reforge.backend.app.tools.sandbox import (
+    ROOT_FALLBACK_ENV,
+    DockerSandbox,
+    DockerUnavailable,
+)
 
 
 FIXTURE_WORKSPACE = Path("reforge/backend/tests/fixtures/workspace")
@@ -47,12 +51,15 @@ def test_compose_mount_source_uses_configured_host_runs_root(monkeypatch: pytest
     assert source == "C:/host/runs/workspace"
 
 
-def test_sandbox_keeps_non_root_default_but_allows_compose_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_keeps_non_root_default_but_allows_explicit_root_fallback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     assert DockerSandbox._sandbox_user() == "reforge"
 
-    monkeypatch.setenv("REFORGE_SANDBOX_USER", "0")
+    monkeypatch.setenv(ROOT_FALLBACK_ENV, "true")
 
     assert DockerSandbox._sandbox_user() == "0"
+    assert ROOT_FALLBACK_ENV in caplog.text
 
 
 def test_sandbox_uses_tmp_home_and_disables_pip_cache() -> None:
@@ -60,4 +67,49 @@ def test_sandbox_uses_tmp_home_and_disables_pip_cache() -> None:
         "HOME": "/tmp",
         "PIP_NO_CACHE_DIR": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+        "NPM_CONFIG_UPDATE_NOTIFIER": "false",
     }
+
+
+def test_sandbox_passes_all_hardening_options_to_docker() -> None:
+    class FinishedContainer:
+        id = "sandbox-id"
+        attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+
+        def reload(self) -> None:
+            pass
+
+        def remove(self, *, force: bool = False) -> None:
+            assert force is True
+
+        def logs(self, *, stdout: bool = True, stderr: bool = True) -> bytes:
+            return b"ok"
+
+    class Containers:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def run(self, image: str, command: list[str], **kwargs: object) -> FinishedContainer:
+            assert image == "reforge-sandbox:latest"
+            assert command == ["python", "-V"]
+            self.kwargs = kwargs
+            return FinishedContainer()
+
+    class Client:
+        def __init__(self) -> None:
+            self.containers = Containers()
+
+    client = Client()
+    result = DockerSandbox(FIXTURE_WORKSPACE, client=client).run(
+        ["python", "-V"], phase="run", timeout=1
+    )
+
+    assert result.exit_code == 0
+    assert client.containers.kwargs["read_only"] is True
+    assert client.containers.kwargs["cap_drop"] == ["ALL"]
+    assert client.containers.kwargs["security_opt"] == ["no-new-privileges"]
+    assert client.containers.kwargs["pids_limit"] == 256
+    assert client.containers.kwargs["nano_cpus"] == 2_000_000_000
+    assert client.containers.kwargs["mem_limit"] == "2g"
+    assert client.containers.kwargs["user"] == "reforge"

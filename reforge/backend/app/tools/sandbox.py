@@ -7,6 +7,7 @@ tests can run on machines where Docker Desktop is not installed or running.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,6 +15,9 @@ from typing import Literal, Protocol
 
 from .interfaces import ExecResult
 
+
+LOGGER = logging.getLogger(__name__)
+ROOT_FALLBACK_ENV = "REFORGE_SANDBOX_ROOT_FALLBACK"
 
 class DockerContainer(Protocol):
     id: str
@@ -97,6 +101,8 @@ class DockerSandbox:
                 environment=self._execution_environment(),
                 read_only=True,
                 tmpfs={"/tmp": "rw,nosuid,nodev,size=512m"},
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges"],
             )
             while self._is_running(container):
                 if time.monotonic() - started >= timeout:
@@ -163,8 +169,21 @@ class DockerSandbox:
 
     @staticmethod
     def _sandbox_user() -> str:
-        """Return the sandbox UID, retaining the non-root default from the spec."""
-        return os.getenv("REFORGE_SANDBOX_USER", "reforge")
+        """Return the unprivileged sandbox user unless the explicit fallback is set.
+
+        Docker Desktop file sharing can reject writes from the image's regular
+        UID on some Windows hosts.  That compatibility exception is deliberately
+        opt-in; it does not make arbitrary UID selection part of the public
+        configuration surface.
+        """
+        fallback = os.getenv(ROOT_FALLBACK_ENV, "").strip().lower()
+        if fallback in {"1", "true", "yes", "on"}:
+            LOGGER.warning(
+                "%s is enabled; sandbox commands run as root for Docker bind-mount compatibility.",
+                ROOT_FALLBACK_ENV,
+            )
+            return "0"
+        return "reforge"
 
     @staticmethod
     def _execution_environment() -> dict[str, str]:
@@ -181,6 +200,8 @@ class DockerSandbox:
             "HOME": "/tmp",
             "PIP_NO_CACHE_DIR": "1",
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+            "NPM_CONFIG_UPDATE_NOTIFIER": "false",
         }
 
     @staticmethod

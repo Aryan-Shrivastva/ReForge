@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .core.state import ProjectState, TestReport
-from .tools.ast_tools import RuleCatalog, scan_deprecated_patterns
+from .tools.ast_tools import RuleCatalog, scan_android_deprecated_patterns, scan_deprecated_patterns
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,14 @@ class ReportGenerator:
 
     def build(self, state: ProjectState, workspace: Path) -> dict[str, Any]:
         initial_patterns = state.analysis.deprecated_patterns if state.analysis else []
-        remaining_patterns = scan_deprecated_patterns(workspace, self.catalog) if workspace.is_dir() else []
+        remaining_patterns = (
+            [
+                *scan_deprecated_patterns(workspace, self.catalog),
+                *scan_android_deprecated_patterns(workspace),
+            ]
+            if workspace.is_dir()
+            else []
+        )
         remaining_keys = {(item.rule_id, item.file, item.line) for item in remaining_patterns}
         fixed_patterns = [
             item
@@ -50,6 +57,7 @@ class ReportGenerator:
         return {
             "run_id": state.run_id,
             "objective": state.objective,
+            "objective_origin": state.objective_origin,
             "outcome": {
                 "status": state.final_status.value if state.final_status else "INCOMPLETE",
                 "stage": state.stage.value,
@@ -154,6 +162,7 @@ class ReportGenerator:
             f"**Run:** `{payload['run_id']}`  ",
             f"**Status:** `{outcome['status']}`  ",
             f"**Objective:** {payload['objective']}",
+            f"**Objective origin:** `{payload['objective_origin']}`",
             "",
             "## Dependencies",
             "",

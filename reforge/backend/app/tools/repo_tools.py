@@ -79,7 +79,15 @@ def normalise_unified_diff_hunks(unified_diff: str) -> str:
 class RepositoryTools:
     """Repository inspection and patching without executing repository code."""
 
-    _IGNORED_DIRECTORIES = {".git", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
+    _IGNORED_DIRECTORIES = {
+        ".git",
+        ".venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".reforge-artifacts",
+    }
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()

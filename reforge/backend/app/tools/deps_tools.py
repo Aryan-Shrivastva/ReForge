@@ -1,9 +1,10 @@
-"""Dependency discovery from common Python project metadata without execution."""
+"""Dependency discovery from common project metadata without execution."""
 
 from __future__ import annotations
 
 import ast
 import configparser
+import json
 import re
 import tomllib
 from collections import defaultdict
@@ -22,7 +23,12 @@ class DeclaredDependency:
 
 
 class DependencyParser:
-    """Parse declarations only; dependency resolution happens in the sandbox."""
+    """Parse declarations only; dependency resolution happens in the sandbox.
+
+    The parser deliberately reports *declared* versions rather than pretending
+    to know a safe upgrade target.  That keeps Android/Gradle evidence just as
+    auditable as the existing Python metadata evidence.
+    """
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()
@@ -46,7 +52,118 @@ class DependencyParser:
             path = self.workspace / name
             if path.is_file():
                 found.extend(parser(path))
+        package_json = self.workspace / "package.json"
+        if package_json.is_file():
+            found.extend(self._parse_package_json(package_json))
+        found.extend(self._parse_gradle_files())
+        version_catalog = self.workspace / "gradle" / "libs.versions.toml"
+        if version_catalog.is_file():
+            found.extend(self._parse_gradle_version_catalog(version_catalog))
         return self._deduplicate(found)
+
+    def _parse_gradle_files(self) -> list[DeclaredDependency]:
+        """Read common Gradle dependency notations without running Gradle."""
+        dependencies: list[DeclaredDependency] = []
+        ignored = {".git", ".venv", "build", ".gradle"}
+        gradle_files = sorted(
+            path
+            for pattern in ("build.gradle", "build.gradle.kts")
+            for path in self.workspace.rglob(pattern)
+            if not any(part in ignored for part in path.relative_to(self.workspace).parts)
+        )
+        for path in gradle_files:
+            source = path.relative_to(self.workspace).as_posix()
+            text = path.read_text(encoding="utf-8")
+            variables = {
+                match.group("name"): match.group("value")
+                for match in re.finditer(
+                    r"(?:val|var)\s+(?P<name>[A-Za-z_]\w*)\s*=\s*[\"'](?P<value>[^\"']+)[\"']",
+                    text,
+                )
+            }
+            # `implementation("group:artifact:version")` and the platform
+            # variant used by Firebase BOMs.
+            for match in re.finditer(
+                r"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|"
+                r"annotationProcessor|kapt)\s*\(\s*(?:platform\s*\(\s*)?[\"'](?P<coordinate>[^\"']+)[\"']",
+                text,
+            ):
+                dependency = self._from_gradle_coordinate(
+                    match.group("coordinate"), source, variables
+                )
+                if dependency is not None:
+                    dependencies.append(dependency)
+            # Version-catalog aliases are useful evidence even when a project
+            # accidentally omitted its catalog file; they should not vanish.
+            for match in re.finditer(
+                r"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation)"
+                r"\s*\(\s*(libs\.[A-Za-z0-9_.]+)\s*\)",
+                text,
+            ):
+                dependencies.append(DeclaredDependency(match.group(1), None, source))
+            for match in re.finditer(
+                r"id\(\s*[\"'](?P<name>[^\"']+)[\"']\s*\)\s+version\s+[\"'](?P<version>[^\"']+)[\"']",
+                text,
+            ):
+                dependencies.append(
+                    DeclaredDependency(f"plugin:{match.group('name')}", match.group("version"), source)
+                )
+        return dependencies
+
+    def _parse_package_json(self, path: Path) -> list[DeclaredDependency]:
+        """Read npm dependency ranges without resolving or installing them."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        dependencies: list[DeclaredDependency] = []
+        for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+            values = data.get(section, {})
+            if not isinstance(values, dict):
+                continue
+            for name, constraint in values.items():
+                if isinstance(name, str) and isinstance(constraint, str):
+                    dependencies.append(DeclaredDependency(name, constraint, f"{path.name} ({section})"))
+        return dependencies
+
+    def _parse_gradle_version_catalog(self, path: Path) -> list[DeclaredDependency]:
+        """Parse a Gradle version catalog when one is present."""
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        versions = data.get("versions", {})
+        libraries = data.get("libraries", {})
+        if not isinstance(versions, dict) or not isinstance(libraries, dict):
+            return []
+        source = path.relative_to(self.workspace).as_posix()
+        dependencies: list[DeclaredDependency] = []
+        for alias, value in libraries.items():
+            if not isinstance(value, dict):
+                continue
+            module = value.get("module")
+            if not isinstance(module, str):
+                continue
+            version = value.get("version")
+            if isinstance(version, dict):
+                version = version.get("ref")
+            if isinstance(version, str):
+                version = versions.get(version, version)
+            dependencies.append(
+                DeclaredDependency(module, str(version) if version is not None else None, source)
+            )
+        return dependencies
+
+    @staticmethod
+    def _from_gradle_coordinate(
+        coordinate: str, source: str, variables: dict[str, str]
+    ) -> DeclaredDependency | None:
+        parts = coordinate.removesuffix("@aar").split(":", 2)
+        if len(parts) < 2:
+            return None
+        constraint = parts[2] if len(parts) == 3 else None
+        if constraint and constraint.startswith("$"):
+            constraint = variables.get(constraint.removeprefix("$"), constraint)
+        return DeclaredDependency(":".join(parts[:2]), constraint or None, source)
 
     @staticmethod
     def _deduplicate(found: list[DeclaredDependency]) -> list[DeclaredDependency]:

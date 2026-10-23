@@ -93,3 +93,19 @@ def test_dependency_change_requests_clean_virtual_environment() -> None:
     command = TestRunner.default_install_command(recreate_venv=True)
 
     assert command.startswith("rm -rf .venv &&")
+
+
+def test_node_project_uses_npm_build_as_an_honest_fallback_check(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "vite build"}}', encoding="utf-8"
+    )
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    sandbox = FakeSandbox(tmp_path, [result(), result()])
+
+    report = TestRunner(sandbox, tmp_path).run("baseline")
+
+    assert report.install_ok is True
+    assert report.passed == ["<npm-build>"]
+    assert report.generated_tests is False
+    assert "npm ci --no-audit --no-fund" in sandbox.calls[0][0][-1]
+    assert sandbox.calls[1][0][-1] == "npm run build"

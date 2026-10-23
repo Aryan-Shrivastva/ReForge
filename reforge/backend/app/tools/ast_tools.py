@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import yaml
 
@@ -122,4 +123,52 @@ def scan_deprecated_patterns(workspace: Path, catalog: RuleCatalog) -> list[Depr
             findings.extend(scanner.scan())
         except (UnicodeDecodeError, SyntaxError):
             continue
+    return findings
+
+
+_ANDROID_TEXT_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "ANDROID-ACTIVITY-RESULTS",
+        re.compile(r"\bstartActivityForResult\s*\("),
+        "Use AndroidX Activity Result APIs (registerForActivityResult) instead.",
+    ),
+    (
+        "ANDROID-ACTIVITY-RESULTS",
+        re.compile(r"\bonActivityResult\s*\("),
+        "Migrate the result handling to an AndroidX Activity Result callback.",
+    ),
+)
+
+
+def scan_android_deprecated_patterns(workspace: Path) -> list[DeprecatedPattern]:
+    """Find a small, explicit set of Android API migrations without compilation.
+
+    These are text rules rather than Python AST rules because the repository may
+    contain Java or Kotlin.  They are intentionally narrow: ReForge reports
+    only patterns it can point to in source, rather than inferring staleness
+    from the age of a repository.
+    """
+    findings: list[DeprecatedPattern] = []
+    for extension in ("*.java", "*.kt"):
+        for path in sorted(workspace.rglob(extension)):
+            if any(part in {".git", ".gradle", "build"} for part in path.relative_to(workspace).parts):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+            relative = path.relative_to(workspace).as_posix()
+            for line_number, line in enumerate(lines, start=1):
+                for rule_id, pattern, hint in _ANDROID_TEXT_RULES:
+                    if pattern.search(line):
+                        findings.append(
+                            DeprecatedPattern(
+                                rule_id=rule_id,
+                                file=relative,
+                                line=line_number,
+                                snippet=line.strip(),
+                                replacement_hint=hint,
+                                source="ast_rule",
+                            )
+                        )
     return findings

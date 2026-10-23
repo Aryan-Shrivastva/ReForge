@@ -103,6 +103,16 @@ def test_generator_rejects_paths_outside_generated_test_directory() -> None:
         generator.propose("Preserve behavior", Path("."))
 
 
+def test_generator_does_not_support_node_projects(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"name": "web"}', encoding="utf-8")
+    generator = CharacterizationTestGenerator(
+        FakeLLM({"summary": "unused", "files": [{"path": "tests/reforge_generated/test_x.py", "content": "pass\n"}]}),
+        repository_factory=FakeRepository,  # type: ignore[arg-type]
+    )
+
+    assert generator.supports(tmp_path) is False
+
+
 def test_repair_applies_guarded_patch_and_commits() -> None:
     repository = FakeRepository(Path("."))
     git = FakeGit(Path("."))

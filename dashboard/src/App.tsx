@@ -16,15 +16,39 @@ function App() {
     try {
       const next = await api.listRuns();
       setRuns(next);
-      setSelected((current) => current ? next.find((run) => run.run_id === current.run_id) ?? current : next[0] ?? null);
+      // Historical runs remain available in the sidebar, but a fresh dashboard
+      // should guide the user to provide a repository rather than auto-opening
+      // an old failure. A newly created run is selected explicitly by startRun.
+      setSelected((current) => current ? next.find((run) => run.run_id === current.run_id) ?? current : null);
+      setError(null);
+      return true;
     } catch (caught) {
       setError(message(caught));
+      return false;
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { void refreshRuns(); }, []);
+  useEffect(() => {
+    let active = true;
+    let retryTimer: number | undefined;
+    let attempts = 0;
+
+    const load = async () => {
+      const connected = await refreshRuns();
+      if (!connected && active && attempts < 3) {
+        attempts += 1;
+        retryTimer = window.setTimeout(() => { void load(); }, 1_000);
+      }
+    };
+
+    void load();
+    return () => {
+      active = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, []);
 
   useEffect(() => {
     if (!selected || selected.final_status) return;
@@ -76,7 +100,7 @@ function App() {
         {runs.map((run) => (
           <button className={`run-row ${selected?.run_id === run.run_id ? "selected" : ""}`} key={run.run_id}
             onClick={() => { setSelected(run); setView("overview"); }}>
-            <span className={`status-dot ${run.final_status?.toLowerCase() ?? "active"}`} />
+            <span className={`status-dot ${effectiveFinalStatus(run)?.toLowerCase() ?? "active"}`} />
             <span><strong>{run.objective}</strong><small>{run.run_id.slice(0, 8)} · {run.stage}</small></span>
           </button>
         ))}
@@ -84,7 +108,7 @@ function App() {
       <section className="content">
         <header className="topbar">
           <div>{selected ? <><p className="eyebrow">{selected.work_branch}</p><h1>{selected.objective}</h1></> : <><p className="eyebrow">ReForge dashboard</p><h1>Choose or start a modernization run</h1></>}</div>
-          {selected && <div className="actions"><StatusBadge status={selected.final_status ?? selected.stage} />{!selected.final_status && <button className="danger" onClick={() => void cancelRun()}>Cancel run</button>}</div>}
+          {selected && <div className="actions"><StatusBadge status={effectiveFinalStatus(selected) ?? selected.stage} />{!selected.final_status && <button className="danger" onClick={() => void cancelRun()}>Cancel run</button>}</div>}
         </header>
         {error && <div className="error"><span>{error}</span><button onClick={() => setError(null)}>Dismiss</button></div>}
         <nav className="tabs">
@@ -145,25 +169,42 @@ function Analysis({ state }: { state: ProjectState }) {
 
 function Plan({ state }: { state: ProjectState }) {
   if (!state.plan) return <Pending label="Plan" />;
-  return <section className="card"><div className="section-heading"><div><p className="eyebrow">Version {state.plan.version}</p><h2>Modernization plan</h2></div></div><p>{state.plan.rationale}</p><div className="steps">{state.plan.steps.map((step) => <article className={`step ${step.status}`} key={step.id}><span className="step-id">{step.id}</span><div><h3>{step.title}</h3><p>{step.description}</p><small>{step.files.join(", ") || "No files"} · validates: {step.validation_hint}</small></div><StatusBadge status={step.status} /></article>)}</div></section>;
+  const baselineAttempt = state.test_runs.find((report) => report.phase === "baseline");
+  const baselineBlocked = !state.baseline && Boolean(baselineAttempt?.failed.length || baselineAttempt?.errored.length || baselineAttempt && !baselineAttempt.install_ok);
+  return <section className="card"><div className="section-heading"><div><p className="eyebrow">Version {state.plan.version}</p><h2>Modernization plan</h2></div></div><p>{state.plan.rationale}</p>{baselineBlocked && <p className="risk">Plan steps are pending because the original repository did not pass its baseline build/test check. ReForge made no source changes, so it does not mistake a pre-existing failure for a successful modernization.</p>}<div className="steps">{state.plan.steps.map((step) => <article className={`step ${step.status}`} key={step.id}><span className="step-id">{step.id}</span><div><h3>{step.title}</h3><p>{step.description}</p><small>{step.files.join(", ") || "No files"} · validates: {step.validation_hint}</small>{planStepError(state, step.id) && <p className="risk">Not applied: {planStepError(state, step.id)}</p>}</div><StatusBadge status={step.status} /></article>)}</div></section>;
 }
 
 function Diff({ state, onError }: { state: ProjectState; onError: (value: string) => void }) {
   const [step, setStep] = useState("");
   const [diff, setDiff] = useState("Select a plan step or load the complete diff.");
-  const load = async () => { try { setDiff(await api.getDiff(state.run_id, step || undefined)); } catch (caught) { onError(message(caught)); } };
-  return <section className="card"><div className="section-heading"><h2>Diff viewer</h2><div className="inline"><select value={step} onChange={(event) => setStep(event.target.value)}><option value="">Whole run</option>{state.plan?.steps.map((item) => <option key={item.id} value={item.id}>{item.id} · {item.title}</option>)}</select><button onClick={() => void load()}>Load diff</button></div></div><pre className="diff">{diff}</pre></section>;
+  const chosen = state.plan?.steps.find((item) => item.id === step);
+  const load = async () => {
+    if (chosen && chosen.status !== "applied") {
+      setDiff(`${chosen.id} has no diff because it was ${chosen.status}. ${planStepError(state, chosen.id) ?? "No files were changed."}`);
+      return;
+    }
+    try {
+      const loaded = await api.getDiff(state.run_id, step || undefined);
+      setDiff(loaded || "No code change was produced for this run.");
+    } catch (caught) {
+      const detail = message(caught);
+      setDiff(`Diff is unavailable: ${detail}`);
+      onError(detail);
+    }
+  };
+  return <section className="card"><div className="section-heading"><h2>Diff viewer</h2><div className="inline"><select value={step} onChange={(event) => setStep(event.target.value)}><option value="">Whole run</option>{state.plan?.steps.map((item) => <option key={item.id} value={item.id}>{item.id} · {item.title} ({item.status})</option>)}</select><button onClick={() => void load()}>Load diff</button></div></div><pre className="diff">{diff}</pre></section>;
 }
 
 function Tests({ state }: { state: ProjectState }) {
   const latest = state.test_runs.at(-1);
-  return <div className="stack"><section className="card"><h2>Baseline versus latest</h2><div className="metric-grid"><Metric label="Frozen baseline" value={String(state.baseline_pass_set.length)} /><Metric label="Latest passed" value={String(latest?.passed.length ?? 0)} /><Metric label="Latest failures" value={String((latest?.failed.length ?? 0) + (latest?.errored.length ?? 0))} /><Metric label="Generated tests" value={state.baseline?.generated_tests ? "yes" : "no"} /></div></section><TestReportCard title="Baseline" report={state.baseline} /><TestReportCard title="Latest verification" report={latest} /><section className="card"><h2>Repair history</h2>{state.repairs.length ? state.repairs.map((repair) => <p key={repair.iteration}>R{repair.iteration}: {repair.diagnosis} · {repair.failing_before} → {repair.failing_after ?? "pending"}</p>) : <p className="muted">No repair attempts.</p>}</section></div>;
+  const baselineAttempt = state.test_runs.find((report) => report.phase === "baseline");
+  return <div className="stack"><section className="card"><h2>Baseline versus latest</h2><div className="metric-grid"><Metric label="Frozen baseline" value={String(state.baseline_pass_set.length)} /><Metric label="Latest passed" value={String(latest?.passed.length ?? 0)} /><Metric label="Latest failures" value={String((latest?.failed.length ?? 0) + (latest?.errored.length ?? 0))} /><Metric label="Generated tests" value={state.baseline?.generated_tests ? "yes" : "no"} /></div></section><TestReportCard title={state.baseline ? "Baseline" : "Baseline attempt"} report={state.baseline ?? baselineAttempt} />{state.baseline && latest !== state.baseline && <TestReportCard title="Latest verification" report={latest} />}<section className="card"><h2>Repair history</h2>{state.repairs.length ? state.repairs.map((repair) => <p key={repair.iteration}>R{repair.iteration}: {repair.diagnosis} · {repair.failing_before} → {repair.failing_after ?? "pending"}</p>) : <p className="muted">No repair attempts.</p>}</section></div>;
 }
 
 function TestReportCard({ title, report }: { title: string; report?: TestReport | null }) {
   if (!report) return <Pending label={title} />;
   const failures = [...report.failed, ...report.errored];
-  return <section className="card"><div className="section-heading"><h2>{title}</h2><StatusBadge status={report.install_ok ? "passed" : "failed"} /></div><p>{report.passed.length} passed · {failures.length} failed/error · {report.skipped.length} skipped · {report.duration_s.toFixed(2)}s</p>{failures.map((failure) => <details key={failure.test_id}><summary>{failure.test_id}: {failure.message}</summary><pre>{failure.traceback_excerpt}</pre></details>)}</section>;
+  return <section className="card"><div className="section-heading"><h2>{title}</h2><StatusBadge status={report.install_ok && failures.length === 0 ? "passed" : "failed"} /></div><p>{report.passed.length} passed · {failures.length} failed/error · {report.skipped.length} skipped · {report.duration_s.toFixed(2)}s</p>{report.generated_tests && <p className="muted">This result includes ReForge-generated characterization tests; these are separate from the repository’s own test suite.</p>}{report.passed.length > 0 && <details><summary>Passed tests ({report.passed.length})</summary><ul>{report.passed.map((test) => <li key={test}><code>{test}</code></li>)}</ul></details>}{report.skipped.length > 0 && <details><summary>Skipped tests ({report.skipped.length})</summary><ul>{report.skipped.map((test) => <li key={test}><code>{test}</code></li>)}</ul></details>}{failures.map((failure) => <details key={failure.test_id}><summary>{failure.test_id}: {failure.message}</summary><pre>{failure.traceback_excerpt}</pre></details>)}</section>;
 }
 
 function Trace({ state }: { state: ProjectState }) {
@@ -178,9 +219,9 @@ function TraceRow({ event }: { event: TraceEvent }) {
 }
 
 function Report({ state, onError }: { state: ProjectState; onError: (value: string) => void }) {
-  const [report, setReport] = useState(state.report_path ? "Load the generated report." : "Final report generation arrives in M10.");
+  const [report, setReport] = useState(state.final_status ? "Load the generated report." : "The final report will be available when this run completes.");
   const load = async () => { try { setReport(await api.getReport(state.run_id)); } catch (caught) { onError(message(caught)); } };
-  return <section className="card"><div className="section-heading"><h2>Final report</h2>{state.report_path && <div className="inline"><button onClick={() => void load()}>Load report</button><a className="download" href={api.reportUrl(state.run_id, "markdown")} download="reforge-report.md">Markdown</a><a className="download" href={api.reportUrl(state.run_id, "json")} download="reforge-report.json">JSON</a></div>}</div><pre className="report">{report}</pre></section>;
+  return <section className="card"><div className="section-heading"><h2>Final report</h2>{state.final_status && <div className="inline"><button onClick={() => void load()}>Load report</button>{state.report_path && <><a className="download" href={api.reportUrl(state.run_id, "markdown")} download="reforge-report.md">Markdown</a><a className="download" href={api.reportUrl(state.run_id, "json")} download="reforge-report.json">JSON</a></>}</div>}</div>{isLegacyFalseSuccess(state) && <p className="risk">This older run was saved as SUCCESS by the previous workflow. Because plan steps failed, its effective outcome is PARTIAL; its stored report is retained for audit.</p>}<pre className="report">{report}</pre></section>;
 }
 
 function Benchmarks({ onError }: { onError: (value: string) => void }) {
@@ -197,6 +238,9 @@ function Table({ headers, rows, empty }: { headers: string[]; rows: string[][]; 
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <article className="metric"><span>{label}</span><strong>{value}</strong></article>; }
+function planStepError(state: ProjectState, stepId: string) { const event = [...state.trace].reverse().find((item) => item.agent === "transformation" && item.summary.startsWith(`${stepId} `)); return typeof event?.data.error === "string" ? event.data.error : null; }
+function isLegacyFalseSuccess(state: ProjectState) { return state.final_status === "SUCCESS" && Boolean(state.plan?.steps.some((step) => step.status !== "applied")); }
+function effectiveFinalStatus(state: ProjectState) { return isLegacyFalseSuccess(state) ? "PARTIAL" : state.final_status; }
 function Pending({ label }: { label: string }) { return <section className="card pending"><h2>{label}</h2><p>Waiting for the deterministic workflow to reach this checkpoint.</p></section>; }
 function EmptyState() { return <section className="empty"><h2>Start a controlled modernization run</h2><p>Provide a Git repository URL or a ZIP archive, then follow every state transition, test result, diff, and repair decision here.</p></section>; }
 function StatusBadge({ status }: { status: string }) { return <span className={`badge ${status.toLowerCase().replaceAll("_", "-")}`}>{status}</span>; }

@@ -66,6 +66,26 @@ class CharacterizationTestGenerator(StructuredAgent):
         self._validate_paths(proposal)
         return proposal
 
+    def supports(self, workspace: Path) -> bool:
+        """Return whether this generator can write executable tests for the stack.
+
+        This implementation writes pytest files only.  It must not create
+        Python filesystem checks for JavaScript, Java, or Kotlin projects,
+        because those checks are neither native tests nor useful behavior
+        coverage.
+        """
+        # Decide this before walking the tree. npm may have created POSIX
+        # symlinks in node_modules on a Windows bind mount, and those are both
+        # irrelevant to Python test generation and unsafe to inspect from the
+        # host filesystem.
+        if (workspace / "package.json").is_file():
+            return False
+        repository = self.repository_factory(workspace)
+        return any(
+            path.endswith(".py") and not path.startswith("tests/")
+            for path in repository.list_tree()
+        )
+
     def write(self, workspace: Path, proposal: TestGenerationProposal) -> list[str]:
         """Create proposed files once; callers test and retain or drop them."""
         self._validate_paths(proposal)
