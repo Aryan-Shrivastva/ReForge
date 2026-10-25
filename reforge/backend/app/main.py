@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,7 +29,14 @@ def create_app(
         # translate their bind mounts for the sibling execution sandbox.
         runs_root=run_service.runs_root / "evaluation",
     )
-    app = FastAPI(title="ReForge API", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        # Runs left non-terminal by a previous process can never finish.
+        run_service.recover_interrupted_runs()
+        yield
+
+    app = FastAPI(title="ReForge API", version="0.1.0", lifespan=lifespan)
     # The Vite dashboard runs on its own local development origin.  Keeping this
     # explicit avoids opening the API to arbitrary browser origins.
     app.add_middleware(

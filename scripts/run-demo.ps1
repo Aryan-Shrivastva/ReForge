@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("flask-legacy-app", "fastapi-pydantic-v1", "stdlib-deprecations", "setup-py-migration", "no-tests-characterization")]
+    [ValidateSet("flask-legacy-app", "fastapi-pydantic-v1", "stdlib-deprecations", "setup-py-migration", "no-tests-characterization", "node-legacy-app")]
     [string]$Benchmark = "flask-legacy-app"
 )
 

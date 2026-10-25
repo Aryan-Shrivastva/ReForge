@@ -9,9 +9,17 @@ description = "Multi-agent software modernization and repair system"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "crewai[anthropic]>=1.12,<2",
+  # appdirs is imported by ReForge's CrewAI storage redirect; newer CrewAI
+  # releases no longer pull it in transitively.
+  "appdirs>=1.4,<2",
+  "crewai[anthropic,google-genai]>=1.12,<2",
   "docker>=7.0,<8",
   "fastapi>=0.115,<1",
+  # Google Agent Development Kit: per-run sessions with state for the
+  # analysis/planning agents (AGENT_FRAMEWORK=adk or hybrid).
+  "google-adk>=1.14,<2",
+  # ADK's LiteLlm wrapper lets ADK agents use OpenAI, Anthropic, and Ollama.
+  "litellm>=1.75.5,<2",
   "packaging>=24,<27",
   "pydantic>=2.7,<3",
   "python-multipart>=0.0.20,<1",

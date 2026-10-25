@@ -1,0 +1,19 @@
+name: node-legacy-app
+objective: Replace deprecated Node.js APIs and the deprecated request package while preserving behavior
+ground_truth:
+  deprecated_patterns:
+    - rule_id: npm-request-package
+      file: src/client.js
+      line: 1
+    - rule_id: node-url-parse
+      file: src/client.js
+      line: 5
+    - rule_id: node-buffer-constructor
+      file: src/encoding.js
+      line: 4
+    - rule_id: node-util-is-type
+      file: src/encoding.js
+      line: 8
+  target_dependencies: {}
+success: baseline_pass_set passes after modernization
+has_tests: true

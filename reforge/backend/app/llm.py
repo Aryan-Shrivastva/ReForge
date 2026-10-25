@@ -105,6 +105,30 @@ class OllamaLLM(HttpLLMClient):
         return response
 
 
+class GeminiLLM(HttpLLMClient):
+    def __init__(self, model: str, *, api_key: str | None = None, temperature: float = 0.1) -> None:
+        self.model = model.removeprefix("gemini/")
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        self.temperature = temperature
+
+    def complete(self, prompt: str) -> str:
+        if not self.api_key:
+            raise LLMConfigurationError("GOOGLE_API_KEY (or GEMINI_API_KEY) is required for the Gemini provider")
+        payload = self._post_json(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+            {"x-goog-api-key": self.api_key},
+            {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": self.temperature}},
+        )
+        try:
+            parts = payload["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Gemini response did not contain candidates[0].content.parts") from exc
+        text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict))
+        if not text:
+            raise RuntimeError("Gemini response did not contain text")
+        return text
+
+
 def build_llm(settings: Settings) -> LLMClient:
     """Create the selected provider client; credentials stay in environment variables."""
     if not settings.llm_model:
@@ -115,4 +139,6 @@ def build_llm(settings: Settings) -> LLMClient:
         return AnthropicLLM(settings.llm_model, temperature=settings.llm_temperature)
     if settings.llm_provider == "ollama":
         return OllamaLLM(settings.llm_model, temperature=settings.llm_temperature)
+    if settings.llm_provider == "gemini":
+        return GeminiLLM(settings.llm_model, temperature=settings.llm_temperature)
     raise LLMConfigurationError(f"Unsupported LLM provider: {settings.llm_provider}")

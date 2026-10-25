@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from .repo_tools import RepositoryTools
+from .safe_git import run_git
 
 
 class GitToolError(RuntimeError):
@@ -40,11 +40,11 @@ class GitTools:
             self._run("add", "--", *checked)
         else:
             self._run("add", "-A")
-        self._run("commit", "-m", message)
+        self._run("commit", "--no-verify", "-m", message)
         return self.current_commit()
 
     def diff(self, revision: str | None = None) -> str:
-        args = ("diff", revision) if revision else ("diff",)
+        args = ("diff", "--no-ext-diff", "--no-textconv", revision) if revision else ("diff", "--no-ext-diff", "--no-textconv")
         return self._run(*args)
 
     def checkout(self, revision: str) -> None:
@@ -57,13 +57,7 @@ class GitTools:
         self._run("reset", "--hard", revision)
 
     def _run(self, *args: str) -> str:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=self.workspace,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        completed = run_git(list(args), cwd=self.workspace)
         if completed.returncode != 0:
             raise GitToolError(completed.stderr.strip() or completed.stdout.strip())
         return completed.stdout.strip()

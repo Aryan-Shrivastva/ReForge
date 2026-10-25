@@ -68,6 +68,10 @@ def test_sandbox_uses_tmp_home_and_disables_pip_cache() -> None:
         "PIP_NO_CACHE_DIR": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+        "COREPACK_HOME": "/tmp/corepack",
+        "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        "YARN_CACHE_FOLDER": "/tmp/yarn-cache",
+        "npm_config_store_dir": "/tmp/pnpm-store",
         "NPM_CONFIG_UPDATE_NOTIFIER": "false",
     }
 

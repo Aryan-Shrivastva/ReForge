@@ -7,7 +7,6 @@ from math import sqrt
 from pathlib import Path
 from statistics import mean
 import shutil
-import subprocess
 import uuid
 from collections.abc import Callable
 
@@ -16,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .core.state import Budgets, FinalStatus, ProjectState
 from .core.workflow import WorkflowRunner
+from .tools.safe_git import initialize_repository
 
 
 class StrictModel(BaseModel):
@@ -169,7 +169,7 @@ class BenchmarkRunner:
         runner = self.workflow_factory(self.runs_root)
         if ablation.enable_codemods is not None:
             runner.enable_codemods = ablation.enable_codemods
-        budgets = Budgets().model_copy(
+        budgets = (getattr(runner, "default_budgets", None) or Budgets()).model_copy(
             update={
                 key: value
                 for key, value in {
@@ -196,16 +196,7 @@ class BenchmarkRunner:
             workspace,
             ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__", ".pytest_cache", ".reforge-artifacts"),
         )
-        for command in (
-            ["git", "init"],
-            ["git", "config", "user.email", "reforge@local.invalid"],
-            ["git", "config", "user.name", "ReForge"],
-            ["git", "add", "."],
-            ["git", "commit", "-m", "Benchmark baseline"],
-        ):
-            completed = subprocess.run(command, cwd=workspace, text=True, capture_output=True, check=False)
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "benchmark setup failed")
+        initialize_repository(workspace, "Benchmark baseline")
 
 
 def evaluate_run(benchmark: BenchmarkDefinition, state: ProjectState) -> RunEvaluation:

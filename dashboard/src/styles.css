@@ -96,3 +96,8 @@ details pre { margin-top: 10px; max-height: 250px; }
 
 @media (max-width: 840px) { .shell { grid-template-columns: 1fr; } .sidebar { position: relative; height: auto; border-right: 0; border-bottom: 1px solid #203140; } .content { padding: 25px 18px 40px; } .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pipeline { grid-template-columns: repeat(10, 80px); } }
 @media (max-width: 520px) { .topbar, .section-heading { align-items: flex-start; flex-direction: column; } .metric-grid { grid-template-columns: 1fr; } .step, .trace-row { grid-template-columns: 1fr; gap: 7px; } .step .badge { justify-self: start; } }
+
+.session-state { display: grid; gap: 0.5rem; margin: 0; }
+.session-state div { display: grid; grid-template-columns: minmax(8rem, 12rem) 1fr; gap: 1rem; }
+.session-state dt { font-weight: 600; color: var(--muted, #64748b); }
+.session-state dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

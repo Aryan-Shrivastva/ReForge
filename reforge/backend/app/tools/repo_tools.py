@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
+
+from .safe_git import run_git
 
 
 class WorkspaceViolation(ValueError):
@@ -152,24 +153,11 @@ class RepositoryTools:
 
     def apply_patch(self, unified_diff: str) -> None:
         """Apply a unified diff through Git, failing rather than partially applying it."""
-        command = ["git", "apply", "--whitespace=error", "--"]
         patch_bytes = normalise_unified_diff_hunks(unified_diff).encode("utf-8")
-        checked = subprocess.run(
-            [*command[:2], "--check", *command[2:]],
-            cwd=self.workspace,
-            input=patch_bytes,
-            capture_output=True,
-            check=False,
-        )
+        checked = run_git(["apply", "--check", "--whitespace=error", "--"], cwd=self.workspace, input=patch_bytes, text=False)
         if checked.returncode != 0:
             raise ValueError(f"patch rejected: {checked.stderr.decode('utf-8', errors='replace').strip()}")
-        completed = subprocess.run(
-            command,
-            cwd=self.workspace,
-            input=patch_bytes,
-            capture_output=True,
-            check=False,
-        )
+        completed = run_git(["apply", "--whitespace=error", "--"], cwd=self.workspace, input=patch_bytes, text=False)
         if completed.returncode != 0:
             error = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"patch check passed but apply failed: {error}")

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
+import re
+import shutil
+import stat
 import threading
 import uuid
 import zipfile
 from collections.abc import Callable
-from dataclasses import fields, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -23,8 +24,23 @@ from ..core.events import RunStateStore, TraceRecorder
 from ..core.state import FinalStatus, ProjectState, Stage
 from ..core.workflow import DISCOVERY_OBJECTIVE, WorkflowRunner
 from ..evaluation import BenchmarkCatalog, BenchmarkRunner, DEFAULT_ABLATIONS, EvaluationSummary
+from ..tools.safe_git import initialize_repository, run_git
 
 DEFAULT_DISCOVERY_OBJECTIVE = DISCOVERY_OBJECTIVE
+CANCEL_MARKER = "cancel.requested"
+_UPLOAD_CHUNK = 1024 * 1024
+# Network transports only.  ``ext::`` runs an arbitrary command, ``file://``
+# and bare paths read the backend's own filesystem, and a leading ``-`` would
+# be parsed as a Git option.
+_REPOSITORY_URL = re.compile(r"^(?:https?://|ssh://|git://)[^\s]+$|^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$")
+
+
+class ArchiveError(ValueError):
+    """Raised when an uploaded archive is unsafe or exceeds configured limits."""
+
+
+class UploadTooLarge(ValueError):
+    """Raised when an upload exceeds MAX_UPLOAD_BYTES."""
 
 
 class RunCreateRequest(BaseModel):
@@ -45,6 +61,8 @@ class RunCreateRequest(BaseModel):
         self.objective = self.objective.strip() or DEFAULT_DISCOVERY_OBJECTIVE
         if sum(bool(source) for source in (self.repo_url, self.workspace_path, self.archive_path)) != 1:
             raise ValueError("provide exactly one repository URL, workspace path, or uploaded archive")
+        if self.repo_url is not None and not _REPOSITORY_URL.match(self.repo_url.strip()):
+            raise ValueError("repo_url must be an https://, http://, ssh://, git://, or user@host:path Git URL")
         return self
 
 
@@ -61,7 +79,14 @@ class BenchmarkRunRequest(BaseModel):
 
 
 class RunService:
-    """Own background run threads and persist state as the durable API contract."""
+    """Own background run threads and persist state as the durable API contract.
+
+    Concurrency rule: while a run's worker thread is alive, only that thread
+    writes the run's ``state.json``.  The API communicates cancellation through
+    an in-memory event plus an on-disk marker file, never by rewriting state
+    underneath the worker (which would race with, and be overwritten by, the
+    worker's next save).
+    """
 
     def __init__(
         self,
@@ -77,9 +102,38 @@ class RunService:
             lambda configured, root: WorkflowRunner.live(configured, runs_root=root)
         )
         self._cancellations: dict[str, threading.Event] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(settings.max_concurrent_runs)
+
+    def recover_interrupted_runs(self) -> list[str]:
+        """Mark runs left non-terminal by a previous process as FAILED.
+
+        Run workers are in-process threads; after a restart nothing will ever
+        finish those runs, so leaving them "running" would hang clients forever.
+        Called once from the application's startup lifespan, never on import.
+        """
+        recovered: list[str] = []
+        for state in self.store.list():
+            with self._lock:
+                alive = state.run_id in self._threads and self._threads[state.run_id].is_alive()
+            if state.final_status is not None or alive:
+                continue
+            cancelled = (self.runs_root / state.run_id / CANCEL_MARKER).is_file()
+            state.stage = Stage.REPORT
+            state.final_status = FinalStatus.ABORTED if cancelled else FinalStatus.FAILED
+            TraceRecorder.add(
+                state,
+                agent="api",
+                kind="error",
+                summary="Run was interrupted because the ReForge service restarted before it finished.",
+            )
+            self.store.save(state)
+            recovered.append(state.run_id)
+        return recovered
 
     def start(self, request: RunCreateRequest) -> str:
+        self.settings.with_overrides(request.config_overrides)
         run_id = uuid.uuid4().hex
         return self._start(run_id, request)
 
@@ -94,6 +148,9 @@ class RunService:
         """Persist a ZIP upload before the background worker safely extracts it."""
         if not filename.lower().endswith(".zip"):
             raise ValueError("uploaded repository must be a .zip archive")
+        if len(content) > self.settings.max_upload_bytes:
+            raise UploadTooLarge(f"upload exceeds {self.settings.max_upload_bytes} bytes")
+        self.settings.with_overrides(config_overrides)
         run_id = uuid.uuid4().hex
         archive = self.runs_root / run_id / "upload.zip"
         archive.parent.mkdir(parents=True, exist_ok=True)
@@ -119,14 +176,15 @@ class RunService:
         )
         TraceRecorder.add(state, agent="api", kind="start", summary="Run queued for background execution.")
         self.store.save(state)
-        with self._lock:
-            self._cancellations[run_id] = threading.Event()
         thread = threading.Thread(
             target=self._execute,
             args=(run_id, request),
             name=f"reforge-run-{run_id[:8]}",
             daemon=True,
         )
+        with self._lock:
+            self._cancellations[run_id] = threading.Event()
+            self._threads[run_id] = thread
         thread.start()
         return run_id
 
@@ -135,30 +193,60 @@ class RunService:
             state = self.store.load(run_id)
         except FileNotFoundError as exc:
             raise KeyError(run_id) from exc
+        marker = self.runs_root / run_id / CANCEL_MARKER
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
         with self._lock:
             event = self._cancellations.setdefault(run_id, threading.Event())
             event.set()
-        if state.final_status is None:
-            state.stage = Stage.REPORT
-            state.final_status = FinalStatus.ABORTED
-            TraceRecorder.add(state, agent="api", kind="decision", summary="Cancellation requested.")
-            self.store.save(state)
+            thread = self._threads.get(run_id)
+        if state.final_status is not None:
+            return state
+        if thread is not None and thread.is_alive():
+            # The worker observes the cancellation at its next checkpoint and
+            # persists ABORTED itself.  Report the request without writing.
+            view = state.model_copy(deep=True)
+            TraceRecorder.add(
+                view,
+                agent="api",
+                kind="decision",
+                summary="Cancellation requested; the run stops at its next checkpoint.",
+            )
+            return view
+        # No live worker (e.g. it finished setup failure handling or the
+        # process restarted): finalize here.
+        state.stage = Stage.REPORT
+        state.final_status = FinalStatus.ABORTED
+        TraceRecorder.add(state, agent="api", kind="decision", summary="Cancellation requested.")
+        self.store.save(state)
         return state
 
     def cancelled(self, run_id: str) -> bool:
         with self._lock:
             event = self._cancellations.get(run_id)
-        return event.is_set() if event else False
+        if event is not None and event.is_set():
+            return True
+        return (self.runs_root / run_id / CANCEL_MARKER).is_file()
 
     def _execute(self, run_id: str, request: RunCreateRequest) -> None:
         workspace = self.runs_root / run_id / "workspace"
+        acquired = False
         try:
+            if not self._slots.acquire(blocking=False):
+                self._note(run_id, "Waiting for a free run slot (MAX_CONCURRENT_RUNS reached).")
+                while not self._slots.acquire(timeout=1.0):
+                    if self.cancelled(run_id):
+                        self._finish_cancelled(run_id, request, workspace)
+                        return
+            acquired = True
             if self.cancelled(run_id):
+                self._finish_cancelled(run_id, request, workspace)
                 return
             self._materialize(request, workspace)
             if self.cancelled(run_id):
+                self._finish_cancelled(run_id, request, workspace)
                 return
-            configured = self._settings_with_overrides(request.config_overrides)
+            configured = self.settings.with_overrides(request.config_overrides)
             runner = self.workflow_factory(configured, self.runs_root)
             runner.cancel_checker = self.cancelled
             state = runner.initialize(
@@ -170,57 +258,136 @@ class RunService:
             runner.run(state)
         except Exception as exc:
             self._save_startup_failure(run_id, request, workspace, exc)
+        finally:
+            if acquired:
+                self._slots.release()
+
+    def _note(self, run_id: str, summary: str) -> None:
+        try:
+            state = self.store.load(run_id)
+        except (FileNotFoundError, ValueError):
+            return
+        TraceRecorder.add(state, agent="api", kind="decision", summary=summary)
+        self.store.save(state)
+
+    def _finish_cancelled(self, run_id: str, request: RunCreateRequest, workspace: Path) -> None:
+        state = self._load_or_new(run_id, request, workspace)
+        if state.final_status is None:
+            state.stage = Stage.REPORT
+            state.final_status = FinalStatus.ABORTED
+            TraceRecorder.add(state, agent="api", kind="decision", summary="Run cancelled before execution started.")
+            self.store.save(state)
 
     def _materialize(self, request: RunCreateRequest, workspace: Path) -> None:
         workspace.parent.mkdir(parents=True, exist_ok=True)
         if request.archive_path:
-            self._extract_archive(Path(request.archive_path), workspace)
-            self._initialize_uploaded_repository(workspace)
+            self._extract_archive(
+                Path(request.archive_path),
+                workspace,
+                max_bytes=self.settings.max_archive_uncompressed_bytes,
+                max_members=self.settings.max_archive_members,
+            )
+            initialize_repository(workspace, "Uploaded repository baseline")
             return
         source = request.workspace_path or request.repo_url
         assert source is not None
-        completed = subprocess.run(
-            ["git", "clone", "--", source, str(workspace)],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=120,
+        completed = run_git(
+            # Symlinks are checked out as plain files so a repository cannot
+            # point workspace paths at the backend's filesystem.
+            ["-c", "core.symlinks=false", "clone", "--no-recurse-submodules", "--", source, str(workspace)],
+            timeout=300,
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "git clone failed")
 
     @staticmethod
-    def _extract_archive(archive: Path, destination: Path) -> None:
+    def _extract_archive(
+        archive: Path,
+        destination: Path,
+        *,
+        max_bytes: int = 1024 * 1024 * 1024,
+        max_members: int = 50_000,
+    ) -> None:
+        """Extract a repository ZIP without its Git metadata, links, or unsafe paths.
+
+        * ``.git`` directories are dropped: ``git init`` would otherwise keep a
+          planted configuration (``core.fsmonitor``) or hooks, which host-side
+          Git would execute.  The repository is re-initialized by ReForge.
+        * Symlink entries are rejected; absolute, drive-letter, backslash, and
+          ``..`` paths are rejected.
+        * Declared uncompressed size and member count are bounded (zip bombs),
+          and actual bytes written are counted while streaming.
+        * A single top-level folder (as produced by GitHub "Download ZIP") is
+          stripped so the project root is the workspace root.
+        """
         try:
             destination.mkdir(parents=True, exist_ok=False)
             with zipfile.ZipFile(archive) as uploaded:
-                for member in uploaded.infolist():
-                    path = PurePosixPath(member.filename)
+                members = uploaded.infolist()
+                if len(members) > max_members:
+                    raise ArchiveError(f"uploaded archive has more than {max_members} entries")
+                if sum(member.file_size for member in members) > max_bytes:
+                    raise ArchiveError(f"uploaded archive expands beyond {max_bytes} bytes")
+                names: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+                for member in members:
+                    raw = member.filename
+                    if "\\" in raw or re.match(r"^[A-Za-z]:", raw):
+                        raise ArchiveError("uploaded archive contains an unsafe path")
+                    path = PurePosixPath(raw)
                     if path.is_absolute() or ".." in path.parts:
-                        raise ValueError("uploaded archive contains an unsafe path")
-                uploaded.extractall(destination)
+                        raise ArchiveError("uploaded archive contains an unsafe path")
+                    if stat.S_ISLNK(member.external_attr >> 16):
+                        raise ArchiveError("uploaded archive contains a symbolic link")
+                    if ".git" in path.parts or path.name == "":
+                        continue
+                    names.append((member, path))
+                prefix = RunService._common_root(names)
+                written = 0
+                for member, path in names:
+                    relative = PurePosixPath(*path.parts[len(prefix):]) if prefix else path
+                    if not relative.parts:
+                        continue
+                    target = destination.joinpath(*relative.parts)
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with uploaded.open(member) as source, target.open("wb") as sink:
+                        while chunk := source.read(_UPLOAD_CHUNK):
+                            written += len(chunk)
+                            if written > max_bytes:
+                                raise ArchiveError(f"uploaded archive expands beyond {max_bytes} bytes")
+                            sink.write(chunk)
         except zipfile.BadZipFile as exc:
-            raise ValueError("uploaded file is not a valid ZIP archive") from exc
+            shutil.rmtree(destination, ignore_errors=True)
+            raise ArchiveError("uploaded file is not a valid ZIP archive") from exc
+        except ArchiveError:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
 
     @staticmethod
-    def _initialize_uploaded_repository(workspace: Path) -> None:
-        for command in (
-            ["git", "init"],
-            ["git", "config", "user.email", "reforge@local.invalid"],
-            ["git", "config", "user.name", "ReForge"],
-            ["git", "add", "."],
-            ["git", "commit", "-m", "Uploaded repository baseline"],
-        ):
-            completed = subprocess.run(command, cwd=workspace, text=True, capture_output=True, check=False)
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "could not initialize upload")
+    def _common_root(names: list[tuple[zipfile.ZipInfo, PurePosixPath]]) -> tuple[str, ...]:
+        """Return a single shared top-level directory, if every entry lives under it."""
+        files = [path for member, path in names if not member.is_dir()]
+        if not files:
+            return ()
+        first = files[0].parts[0]
+        if all(len(path.parts) > 1 and path.parts[0] == first for path in files):
+            return (first,)
+        return ()
 
-    def _settings_with_overrides(self, overrides: dict[str, Any]) -> Settings:
-        permitted = {field.name for field in fields(Settings)}
-        unknown = set(overrides) - permitted
-        if unknown:
-            raise ValueError(f"unsupported config overrides: {sorted(unknown)}")
-        return replace(self.settings, **overrides)
+    def _load_or_new(self, run_id: str, request: RunCreateRequest, workspace: Path) -> ProjectState:
+        try:
+            return self.store.load(run_id)
+        except FileNotFoundError:
+            return ProjectState(
+                run_id=run_id,
+                repo_source=request.repo_url or request.workspace_path or request.archive_path or "",
+                objective=request.objective,
+                workspace_path=str(workspace),
+                work_branch=f"reforge/{run_id}",
+                base_commit="",
+            )
 
     def _save_startup_failure(
         self,
@@ -229,20 +396,10 @@ class RunService:
         workspace: Path,
         exc: Exception,
     ) -> None:
-        try:
-            state = self.store.load(run_id)
-        except FileNotFoundError:
-            state = ProjectState(
-                run_id=run_id,
-                repo_source=request.repo_url or request.workspace_path or request.archive_path or "",
-                objective=request.objective,
-                workspace_path=str(workspace),
-                work_branch=f"reforge/{run_id}",
-                base_commit="",
-            )
+        state = self._load_or_new(run_id, request, workspace)
         if state.final_status is None:
             state.stage = Stage.REPORT
-            state.final_status = FinalStatus.FAILED
+            state.final_status = FinalStatus.ABORTED if self.cancelled(run_id) else FinalStatus.FAILED
             TraceRecorder.add(
                 state,
                 agent="api",
@@ -252,6 +409,21 @@ class RunService:
             self.store.save(state)
 
 
+async def _read_upload(upload: Any, limit: int) -> bytes:
+    """Read an upload in chunks, refusing to buffer more than ``limit`` bytes."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLarge(f"upload exceeds {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | None = None) -> APIRouter:
     router = APIRouter(tags=["runs"])
 
@@ -259,6 +431,9 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
     async def create_run(request: Request) -> RunCreated:
         content_type = request.headers.get("content-type", "")
         if content_type.startswith("multipart/form-data"):
+            declared = request.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > service.settings.max_upload_bytes + _UPLOAD_CHUNK:
+                raise HTTPException(status_code=413, detail="upload is too large")
             form = await request.form()
             upload = form.get("upload")
             objective = form.get("objective")
@@ -272,19 +447,21 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
                 run_id = service.start_upload(
                     objective=objective if isinstance(objective, str) else None,
                     filename=str(getattr(upload, "filename", "")),
-                    content=await upload.read(),
+                    content=await _read_upload(upload, service.settings.max_upload_bytes),
                     config_overrides=overrides,
                 )
+            except UploadTooLarge as exc:
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
             except (ValueError, json.JSONDecodeError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             return RunCreated(run_id=run_id)
         try:
             payload = RunCreateRequest.model_validate(await request.json())
+            return RunCreated(run_id=service.start(payload))
         except RequestValidationError:
             raise
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return RunCreated(run_id=service.start(payload))
 
     @router.get("/runs", response_model=list[ProjectState])
     def list_runs() -> list[ProjectState]:
@@ -298,7 +475,7 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
     def cancel_run(run_id: str) -> ProjectState:
         try:
             return service.cancel(run_id)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
 
     @router.get("/runs/{run_id}/analysis")
@@ -314,6 +491,12 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
         if state.plan is None:
             raise HTTPException(status_code=404, detail="plan is not available")
         return state.plan
+
+    @router.get("/runs/{run_id}/session")
+    def get_session(run_id: str) -> dict[str, object]:
+        """Agent runtime per role and the mirrored Google ADK session state."""
+        state = _load(service, run_id)
+        return {"agent_runtime": state.agent_runtime, "state": state.agent_session}
 
     @router.get("/runs/{run_id}/tests")
     def get_tests(run_id: str) -> dict[str, object | None]:
@@ -331,10 +514,14 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
             if matching is None or matching.commit_sha is None:
                 raise HTTPException(status_code=404, detail="step diff is not available")
             revision = matching.commit_sha
-        command = ["git", "-C", state.workspace_path, "show", "--format=", revision] if revision else [
-            "git", "-C", state.workspace_path, "diff", state.base_commit
-        ]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        if not state.base_commit or not Path(state.workspace_path).is_dir():
+            raise HTTPException(status_code=404, detail="diff is not available")
+        command = (
+            ["show", "--no-ext-diff", "--no-textconv", "--format=", revision]
+            if revision
+            else ["diff", "--no-ext-diff", "--no-textconv", state.base_commit]
+        )
+        completed = run_git(command, cwd=state.workspace_path)
         if completed.returncode != 0:
             raise HTTPException(status_code=404, detail="diff is not available")
         return completed.stdout

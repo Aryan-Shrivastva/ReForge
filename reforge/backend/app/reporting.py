@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .core.state import ProjectState, TestReport
-from .tools.ast_tools import RuleCatalog, scan_android_deprecated_patterns, scan_deprecated_patterns
+from .tools.safe_git import run_git
+from .tools.ast_tools import RuleCatalog, scan_all_deprecated_patterns
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,14 +37,7 @@ class ReportGenerator:
 
     def build(self, state: ProjectState, workspace: Path) -> dict[str, Any]:
         initial_patterns = state.analysis.deprecated_patterns if state.analysis else []
-        remaining_patterns = (
-            [
-                *scan_deprecated_patterns(workspace, self.catalog),
-                *scan_android_deprecated_patterns(workspace),
-            ]
-            if workspace.is_dir()
-            else []
-        )
+        remaining_patterns = scan_all_deprecated_patterns(workspace, self.catalog) if workspace.is_dir() else []
         remaining_keys = {(item.rule_id, item.file, item.line) for item in remaining_patterns}
         fixed_patterns = [
             item
@@ -58,6 +51,9 @@ class ReportGenerator:
             "run_id": state.run_id,
             "objective": state.objective,
             "objective_origin": state.objective_origin,
+            "languages": state.analysis.languages if state.analysis else [],
+            "agent_runtime": state.agent_runtime,
+            "agent_session": state.agent_session,
             "outcome": {
                 "status": state.final_status.value if state.final_status else "INCOMPLETE",
                 "stage": state.stage.value,
@@ -111,8 +107,7 @@ class ReportGenerator:
     def _git_changes(workspace: Path, base_commit: str) -> dict[str, Any]:
         if not workspace.is_dir() or not base_commit:
             return {"files": [], "files_changed": 0, "lines_added": 0, "lines_removed": 0}
-        command = ["git", "-C", str(workspace), "diff", "--numstat", base_commit]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        completed = run_git(["diff", "--no-ext-diff", "--numstat", base_commit], cwd=workspace)
         if completed.returncode != 0:
             return {"files": [], "files_changed": 0, "lines_added": 0, "lines_removed": 0}
         files: list[dict[str, Any]] = []
@@ -162,13 +157,37 @@ class ReportGenerator:
             f"**Run:** `{payload['run_id']}`  ",
             f"**Status:** `{outcome['status']}`  ",
             f"**Objective:** {payload['objective']}",
-            f"**Objective origin:** `{payload['objective_origin']}`",
+            f"**Objective origin:** `{payload['objective_origin']}`  ",
+            f"**Languages:** {', '.join(payload.get('languages') or []) or '—'}",
+            "",
+            "## Agent runtime",
+            "",
+        ]
+        runtime = payload.get("agent_runtime") or {}
+        if runtime:
+            lines.extend(f"- `{role}`: {framework}" for role, framework in sorted(runtime.items()))
+        else:
+            lines.append("- Not recorded (agents were injected directly).")
+        session = payload.get("agent_session") or {}
+        if session:
+            lines.extend([
+                "",
+                "Google ADK session state at the end of the run:",
+                "",
+                "| Key | Value |",
+                "|---|---|",
+            ])
+            for key in ("objective", "stage", "languages", "plan_summary", "repair_history", "agent_calls", "agent_history"):
+                if key in session and session[key] not in ("", None):
+                    value = str(session[key]).replace("\n", "<br>").replace("|", "\\|")
+                    lines.append(f"| {key} | {value[:600]} |")
+        lines.extend([
             "",
             "## Dependencies",
             "",
             "| Dependency | Before | Target | Status | Reason |",
             "|---|---:|---:|---|---|",
-        ]
+        ])
         if dependencies:
             lines.extend(
                 f"| {item['name']} | {item['current'] or '—'} | {item['target'] or '—'} | {item['status']} | {item['reason']} |"

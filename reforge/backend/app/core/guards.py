@@ -2,6 +2,8 @@
 
 These guards run outside LLM prompts.  They reject unsafe proposals before a
 patch is applied, so an agent cannot weaken a test suite to obtain a pass.
+They cover Python (pytest/unittest) and JavaScript/TypeScript (Jest, Vitest,
+Mocha) test conventions.
 """
 
 from __future__ import annotations
@@ -11,29 +13,63 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from ..tools.languages import language_for, is_js_test_file, is_test_config, is_test_infrastructure
+
 
 class GuardViolation(ValueError):
     """Raised when a proposed repository change violates a workflow guard."""
 
 
-_DIFF_PATH = re.compile(r"^(?:---|\+\+\+)\s+(?P<path>\S+)")
-_WEAKENING_MARKERS = (
-    re.compile(r"\bpytest\.mark\.(?:skip|xfail)\b"),
-    re.compile(r"@unittest\.skip\b"),
+# ``--- a/path`` / ``+++ b/path``, optionally quoted by Git and optionally
+# followed by a tab-separated timestamp.  Paths may contain spaces.
+_DIFF_PATH = re.compile(r'^(?:---|\+\+\+) (?P<path>"(?:[^"\\]|\\.)*"|[^\t\r\n]+?)(?:\t.*)?\s*$')
+_PYTHON_WEAKENING_MARKERS = (
+    re.compile(r"\bpytest\.mark\.(?:skip|skipif|xfail)\b"),
+    re.compile(r"\bpytest\.(?:skip|xfail|importorskip)\s*\("),
+    re.compile(r"@(?:unittest\.)?(?:skip|skipIf|skipUnless|expectedFailure)\b"),
+    re.compile(r"\bself\.skipTest\s*\("),
+    re.compile(r"\braise\s+(?:unittest\.)?SkipTest\b"),
+    re.compile(r"\bfrom\s+unittest\s+import\s+.*\b(?:skip|skipIf|skipUnless|expectedFailure)\b"),
+)
+_JS_WEAKENING_MARKERS = (
+    re.compile(r"(?<![\w.$])(?:it|test|describe|suite|context|specify)\.(?:skip|todo|only|failing)\b"),
+    # Bare globals only: ``model.fit(`` or ``obj.xit(`` are ordinary calls.
+    re.compile(r"(?<![\w.$])(?:xit|xtest|xdescribe|xcontext|xspecify|fit|fdescribe)\s*\("),
+    re.compile(r"(?<![\w.$])this\.skip\s*\("),
 )
 _BROAD_EXCEPT = re.compile(r"^\s*except(?:\s*:\s*|\s+(?:Exception|BaseException)\s*:)")
-_ASSERTION = re.compile(r"^\s*(?:assert\b|self\.assert\w+\s*\()")
-_TEST_CONFIG_NAMES = {"pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}
+_PYTHON_ASSERTION = re.compile(r"^\s*(?:assert\b|self\.assert\w+\s*\()")
+_JS_ASSERTION = re.compile(r"\b(?:expect|assert)\s*[.(]|\.should\b")
+_PYTHON_SELECTION_WEAKENING = re.compile(
+    r"--ignore|--deselect|(?:^|\s)-k(?:\s|=)|-p\s*no:|\b(?:testpaths|norecursedirs|python_files|python_classes|python_functions|collect_ignore)\b"
+)
+_JS_SELECTION_WEAKENING = re.compile(
+    r"\b(?:testPathIgnorePatterns|testMatch|testRegex|roots|modulePathIgnorePatterns|passWithNoTests|testNamePattern)\b"
+    r"|--(?:passWithNoTests|testPathIgnorePatterns|testNamePattern|grep|invert|exclude|bail)\b"
+    r"|\|\|\s*(?:true|exit\s+0)\b|;\s*exit\s+0\b"
+)
+_VITEST_FILTER = re.compile(r"\b(?:exclude|include)\s*:")
+
+
+def _unquote(path: str) -> str:
+    """Decode Git's C-style quoted path (octal escapes for non-ASCII bytes)."""
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        try:
+            return path[1:-1].encode("latin-1").decode("unicode_escape").encode("latin-1").decode("utf-8")
+        except (UnicodeError, ValueError) as exc:
+            raise GuardViolation(f"unsupported quoted patch path: {path!r}") from exc
+    return path
 
 
 def _normalise_path(path: str) -> str:
     """Normalise a diff path and reject absolute/traversal paths."""
+    path = _unquote(path.strip())
     if path == "/dev/null":
         return path
     if path.startswith(("a/", "b/")):
         path = path[2:]
     candidate = PurePosixPath(path)
-    if candidate.is_absolute() or ".." in candidate.parts or path in {"", "."}:
+    if candidate.is_absolute() or ".." in candidate.parts or path in {"", "."} or "\\" in path:
         raise GuardViolation(f"unsafe patch path: {path!r}")
     return candidate.as_posix()
 
@@ -79,9 +115,7 @@ class MutationGuards:
     def validate_transformation_patch(self, unified_diff: str, declared_files: list[str]) -> set[str]:
         """Reject protected, weakening, or out-of-scope changes before applying."""
         paths = changed_paths(unified_diff)
-        protected = paths & self.protected_test_files
-        if protected:
-            raise GuardViolation(f"patch touches protected baseline tests: {sorted(protected)}")
+        self._reject_protected_and_infrastructure(paths)
 
         allowed = {_normalise_path(path) for path in declared_files}
         new_files = _new_file_paths(unified_diff)
@@ -99,6 +133,9 @@ class MutationGuards:
         protected = normalised & self.protected_test_files
         if protected:
             raise GuardViolation(f"codemod may not edit protected baseline tests: {sorted(protected)}")
+        infrastructure = sorted(path for path in normalised if is_test_infrastructure(path))
+        if infrastructure:
+            raise GuardViolation(f"codemod may not edit test infrastructure: {infrastructure}")
 
     def register_repair_patch(self, unified_diff: str) -> str:
         """Reject an exact repair diff that was already attempted in this run."""
@@ -111,41 +148,82 @@ class MutationGuards:
     def validate_repair_patch(self, unified_diff: str) -> set[str]:
         """Validate a repair without granting it a transformation step's scope."""
         paths = changed_paths(unified_diff)
-        protected = paths & self.protected_test_files
-        if protected:
-            raise GuardViolation(f"patch touches protected baseline tests: {sorted(protected)}")
+        self._reject_protected_and_infrastructure(paths)
         self._reject_test_weakening(unified_diff)
         self._reject_dependency_rollback(unified_diff)
         self.register_repair_patch(unified_diff)
         return paths
 
+    def _reject_protected_and_infrastructure(self, paths: set[str]) -> None:
+        protected = paths & self.protected_test_files
+        if protected:
+            raise GuardViolation(f"patch touches protected baseline tests: {sorted(protected)}")
+        infrastructure = sorted(path for path in paths if is_test_infrastructure(path))
+        if infrastructure:
+            raise GuardViolation(f"patch touches test files or test infrastructure: {infrastructure}")
+
     def _reject_test_weakening(self, unified_diff: str) -> None:
         current_path: str | None = None
         for line in unified_diff.splitlines():
-            if line.startswith("+++ "):
+            if line.startswith("+++ ") or line.startswith("--- "):
                 match = _DIFF_PATH.match(line)
-                current_path = _normalise_path(match.group("path")) if match else None
+                if line.startswith("+++ ") and match:
+                    candidate = _normalise_path(match.group("path"))
+                    current_path = None if candidate == "/dev/null" else candidate
                 continue
-            if line.startswith("+") and not line.startswith("+++"):
+            if line.startswith("+"):
                 added = line[1:]
-                if any(marker.search(added) for marker in _WEAKENING_MARKERS):
-                    raise GuardViolation("patch adds a test skip or xfail marker")
-                if _BROAD_EXCEPT.match(added):
+                language = language_for(current_path) if current_path else None
+                markers = (
+                    _PYTHON_WEAKENING_MARKERS if language == "python"
+                    else _JS_WEAKENING_MARKERS if language in {"javascript", "typescript"}
+                    else ()
+                )
+                if any(marker.search(added) for marker in markers):
+                    raise GuardViolation("patch adds a test skip, xfail, todo, or focus marker")
+                if language == "python" and _BROAD_EXCEPT.match(added):
                     raise GuardViolation("patch adds a broad exception handler")
-                if current_path and PurePosixPath(current_path).name in _TEST_CONFIG_NAMES:
-                    if "--ignore" in added or re.search(r"(?:^|\s)-k(?:\s|=)", added):
-                        raise GuardViolation("patch weakens test selection in configuration")
-            if line.startswith("-") and not line.startswith("---") and _ASSERTION.match(line[1:]):
-                raise GuardViolation("patch removes a test assertion")
+                if current_path and is_test_config(current_path) and self._weakens_selection(current_path, added):
+                    raise GuardViolation("patch weakens test selection in configuration")
+            elif line.startswith("-"):
+                removed = line[1:]
+                language = language_for(current_path) if current_path else None
+                if language in {"python", None} and _PYTHON_ASSERTION.match(removed):
+                    raise GuardViolation("patch removes a test assertion")
+                if current_path and is_js_test_file(current_path) and _JS_ASSERTION.search(removed):
+                    raise GuardViolation("patch removes a test assertion")
+
+    @staticmethod
+    def _weakens_selection(path: str, added: str) -> bool:
+        name = PurePosixPath(path).name
+        if name in {"pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}:
+            return bool(_PYTHON_SELECTION_WEAKENING.search(added))
+        if _JS_SELECTION_WEAKENING.search(added):
+            return True
+        return name.startswith(("vitest.config.", "vite.config.")) and bool(_VITEST_FILTER.search(added))
 
     def _reject_dependency_rollback(self, unified_diff: str) -> None:
+        """Reject an added line that re-declares a dependency at its prior constraint.
+
+        Both the dependency name and its exact prior constraint must appear on
+        the same added line as whole tokens.  A bare substring match would
+        reject unrelated lines (``2.0`` inside ``2.0.1``).
+        """
         if self.allow_dependency_rollback_fallback:
             return
-        added = "\n".join(
+        added_lines = [
             line[1:] for line in unified_diff.splitlines() if line.startswith("+") and not line.startswith("+++")
-        )
+        ]
         for dependency, old_constraint in self.prior_dependency_constraints.items():
-            if old_constraint and old_constraint in added:
-                raise GuardViolation(
-                    f"patch restores prior dependency constraint for {dependency!r}; rollback fallback is disabled"
-                )
+            if not old_constraint:
+                continue
+            name_pattern = re.compile(
+                r"(?<![\w.-])" + r"[-_.]+".join(re.escape(part) for part in re.split(r"[-_.]+", dependency)) + r"(?![\w-])",
+                re.IGNORECASE,
+            )
+            constraint_pattern = re.compile(r"(?<![\w.])" + re.escape(old_constraint) + r"(?![\w.])")
+            for added in added_lines:
+                if name_pattern.search(added) and constraint_pattern.search(added):
+                    raise GuardViolation(
+                        f"patch restores prior dependency constraint for {dependency!r}; rollback fallback is disabled"
+                    )

@@ -92,7 +92,7 @@ class DockerSandbox:
                 cmd,
                 detach=True,
                 working_dir="/work",
-                volumes={self._docker_mount_source(): {"bind": "/work", "mode": "rw"}},
+                volumes=self._volumes(),
                 network_mode=None if phase == "install" else "none",
                 nano_cpus=self.cpus * 1_000_000_000,
                 mem_limit=self.mem_limit,
@@ -146,6 +146,22 @@ class DockerSandbox:
             ) from exc
         self._client = client
         return client
+
+    def _volumes(self) -> dict[str, dict[str, str]]:
+        """Mount the workspace writable but its Git metadata read-only.
+
+        Host-side Git later commits sandbox-produced changes.  A writable
+        ``.git`` would let repository code plant hooks, ``core.fsmonitor``
+        commands, or filter drivers that the host would then execute.
+        """
+        source = self._docker_mount_source()
+        volumes = {source: {"bind": "/work", "mode": "rw"}}
+        if (self.workspace / ".git").exists():
+            # A translated Compose host path is always POSIX-joined; a direct
+            # local path uses the host's own separator.
+            git_source = str(self.workspace / ".git") if source == str(self.workspace) else f"{source.rstrip('/')}/.git"
+            volumes[git_source] = {"bind": "/work/.git", "mode": "ro"}
+        return volumes
 
     def _docker_mount_source(self) -> str:
         """Translate a Compose-container workspace to its host bind source.
@@ -202,6 +218,10 @@ class DockerSandbox:
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "NPM_CONFIG_CACHE": "/tmp/npm-cache",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            "COREPACK_HOME": "/tmp/corepack",
+            "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+            "YARN_CACHE_FOLDER": "/tmp/yarn-cache",
+            "npm_config_store_dir": "/tmp/pnpm-store",
         }
 
     @staticmethod

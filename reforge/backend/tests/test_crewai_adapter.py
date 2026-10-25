@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
 from reforge.backend.app.agents.crewai_adapter import (
@@ -110,6 +111,7 @@ def test_executor_passes_temperature_for_models_that_support_it() -> None:
 
 def test_real_crewai_types_construct_without_a_model_call(monkeypatch) -> None:
     """Exercise the installed CrewAI API without a key or network request."""
+    pytest.importorskip("crewai", reason="CrewAI is not installed in this environment")
     # CrewAI auto-loads a nearby `.env`; keep this construction-only test from
     # inheriting a developer's real credential.
     monkeypatch.setenv("OPENAI_API_KEY", "")

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from pathlib import Path
+from functools import lru_cache
+from pathlib import Path, PurePosixPath
 import re
 
 import yaml
 
 from ..core.state import DeprecatedPattern
+from .languages import JS_LIKE_EXTENSIONS, iter_source_files
+
+_RULES_DIRECTORY = Path(__file__).resolve().parents[1] / "rules"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,16 +118,115 @@ class DeprecatedPatternScanner(ast.NodeVisitor):
 
 def scan_deprecated_patterns(workspace: Path, catalog: RuleCatalog) -> list[DeprecatedPattern]:
     findings: list[DeprecatedPattern] = []
-    for path in sorted(workspace.rglob("*.py")):
-        if any(part in {".git", ".venv", "__pycache__"} for part in path.relative_to(workspace).parts):
-            continue
+    root = workspace.resolve()
+    for path in iter_source_files(root, (".py",)):
         try:
             source = path.read_text(encoding="utf-8")
-            scanner = DeprecatedPatternScanner(catalog, path.relative_to(workspace).as_posix(), source)
+            scanner = DeprecatedPatternScanner(catalog, path.relative_to(root).as_posix(), source)
             findings.extend(scanner.scan())
-        except (UnicodeDecodeError, SyntaxError):
+        except (UnicodeDecodeError, SyntaxError, ValueError):
             continue
     return findings
+
+
+@dataclass(frozen=True, slots=True)
+class TextRule:
+    """A per-line regular-expression rule for languages ReForge does not parse."""
+
+    id: str
+    pattern: re.Pattern[str]
+    replacement_hint: str
+    extensions: tuple[str, ...] = JS_LIKE_EXTENSIONS
+
+
+class TextRuleCatalog:
+    def __init__(self, rules: list[TextRule]) -> None:
+        self.rules = rules
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "TextRuleCatalog":
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+            raise ValueError("text rule catalog must contain a 'rules' list")
+        rules: list[TextRule] = []
+        for item in data["rules"]:
+            if not isinstance(item, dict):
+                continue
+            extensions = item.get("extensions")
+            rules.append(
+                TextRule(
+                    id=str(item["id"]),
+                    pattern=re.compile(str(item["pattern"])),
+                    replacement_hint=str(item["replacement_hint"]),
+                    extensions=tuple(str(value) for value in extensions) if extensions else JS_LIKE_EXTENSIONS,
+                )
+            )
+        return cls(rules)
+
+    def lookup(self, rule_id: str) -> TextRule:
+        for rule in self.rules:
+            if rule.id == rule_id:
+                return rule
+        raise KeyError(rule_id)
+
+
+@lru_cache(maxsize=1)
+def default_javascript_catalog() -> TextRuleCatalog:
+    return TextRuleCatalog.from_yaml(_RULES_DIRECTORY / "javascript_deprecations.yaml")
+
+
+_MINIFIED_LINE_LENGTH = 1_000
+
+
+def scan_text_rules(workspace: Path, catalog: TextRuleCatalog) -> list[DeprecatedPattern]:
+    """Apply line rules to JavaScript/TypeScript sources without executing or bundling them.
+
+    Minified bundles (very long lines, ``*.min.js``) are skipped: they are
+    build output, not maintainable source.
+    """
+    root = workspace.resolve()
+    extensions = tuple(sorted({extension for rule in catalog.rules for extension in rule.extensions}))
+    findings: list[DeprecatedPattern] = []
+    for path in iter_source_files(root, extensions):
+        relative = path.relative_to(root).as_posix()
+        if ".min." in PurePosixPath(relative).name:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        suffix = path.suffix.lower()
+        applicable = [rule for rule in catalog.rules if suffix in rule.extensions]
+        for line_number, line in enumerate(lines, start=1):
+            if len(line) > _MINIFIED_LINE_LENGTH or line.lstrip().startswith(("//", "*", "/*")):
+                continue
+            for rule in applicable:
+                if rule.pattern.search(line):
+                    findings.append(
+                        DeprecatedPattern(
+                            rule_id=rule.id,
+                            file=relative,
+                            line=line_number,
+                            snippet=line.strip()[:300],
+                            replacement_hint=rule.replacement_hint,
+                            source="ast_rule",
+                        )
+                    )
+    return findings
+
+
+def scan_all_deprecated_patterns(
+    workspace: Path,
+    catalog: RuleCatalog,
+    text_catalog: TextRuleCatalog | None = None,
+) -> list[DeprecatedPattern]:
+    """Run every deterministic scanner: Python AST, JavaScript/TypeScript text, and Android rules."""
+    root = workspace.resolve()
+    return [
+        *scan_deprecated_patterns(root, catalog),
+        *scan_text_rules(root, text_catalog or default_javascript_catalog()),
+        *scan_android_deprecated_patterns(root),
+    ]
 
 
 _ANDROID_TEXT_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
@@ -149,26 +252,24 @@ def scan_android_deprecated_patterns(workspace: Path) -> list[DeprecatedPattern]
     from the age of a repository.
     """
     findings: list[DeprecatedPattern] = []
-    for extension in ("*.java", "*.kt"):
-        for path in sorted(workspace.rglob(extension)):
-            if any(part in {".git", ".gradle", "build"} for part in path.relative_to(workspace).parts):
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
-                continue
-            relative = path.relative_to(workspace).as_posix()
-            for line_number, line in enumerate(lines, start=1):
-                for rule_id, pattern, hint in _ANDROID_TEXT_RULES:
-                    if pattern.search(line):
-                        findings.append(
-                            DeprecatedPattern(
-                                rule_id=rule_id,
-                                file=relative,
-                                line=line_number,
-                                snippet=line.strip(),
-                                replacement_hint=hint,
-                                source="ast_rule",
-                            )
+    root = workspace.resolve()
+    for path in iter_source_files(root, (".java", ".kt")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        relative = path.relative_to(root).as_posix()
+        for line_number, line in enumerate(lines, start=1):
+            for rule_id, pattern, hint in _ANDROID_TEXT_RULES:
+                if pattern.search(line):
+                    findings.append(
+                        DeprecatedPattern(
+                            rule_id=rule_id,
+                            file=relative,
+                            line=line_number,
+                            snippet=line.strip(),
+                            replacement_hint=hint,
+                            source="ast_rule",
                         )
+                    )
     return findings

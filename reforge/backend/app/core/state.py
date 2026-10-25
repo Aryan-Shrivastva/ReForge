@@ -60,6 +60,7 @@ class TestInventory(StrictModel):
 
 
 class AnalysisReport(StrictModel):
+    languages: list[str] = Field(default_factory=list)
     python_version_current: str | None = None
     python_version_target: str | None = None
     dependencies: list[DependencyFinding] = Field(default_factory=list)
@@ -107,7 +108,7 @@ class PatchProposal(StrictModel):
 class GeneratedTestFile(StrictModel):
     """One new baseline-only characterization test file."""
 
-    path: str = Field(pattern=r"^tests/reforge_generated/[A-Za-z0-9_./-]+\.py$")
+    path: str = Field(pattern=r"^tests/reforge_generated/[A-Za-z0-9_./-]+\.(?:py|test\.(?:js|mjs|cjs|ts))$")
     content: str = Field(min_length=1)
 
 
@@ -231,3 +232,7 @@ class ProjectState(StrictModel):
     trace: list[TraceEvent] = Field(default_factory=list)
     final_status: FinalStatus | None = None
     report_path: str | None = None
+    # Agent role -> runtime ("crewai" or "adk") used for this run.
+    agent_runtime: dict[str, str] = Field(default_factory=dict)
+    # Mirror of the run's Google ADK session state (empty when no ADK agent runs).
+    agent_session: dict[str, Any] = Field(default_factory=dict)

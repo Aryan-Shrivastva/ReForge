@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from ..core.state import AnalysisReport, Plan, RepairAttempt, TestReport
 from ..llm import LLMClient
 from .base import StructuredAgent
-from .crewai_adapter import CrewAIExecutor
+from .executor import AgentExecutor
 from .prompts import PLANNING_PROMPT, REPLANNING_PROMPT
 
 
@@ -53,12 +53,12 @@ class PlanningAgent(StructuredAgent):
         self,
         llm: LLMClient | None = None,
         *,
-        crew_executor: CrewAIExecutor | None = None,
+        executor: AgentExecutor | None = None,
         max_retries: int = 2,
     ) -> None:
-        if (llm is None) == (crew_executor is None):
-            raise ValueError("provide exactly one of llm or crew_executor")
-        self.crew_executor = crew_executor
+        if (llm is None) == (executor is None):
+            raise ValueError("provide exactly one of llm or executor")
+        self.executor = executor
         if llm is not None:
             super().__init__(llm, max_retries=max_retries)
 
@@ -69,8 +69,8 @@ class PlanningAgent(StructuredAgent):
             files=json.dumps(workspace_files),
             schema=json.dumps(Plan.model_json_schema()),
         )
-        if self.crew_executor is not None:
-            return self.crew_executor.run(
+        if self.executor is not None:
+            return self.executor.run(
                 role="Repository modernization planner",
                 goal="Produce a safe, dependency-aware modernization plan.",
                 backstory="You create small acyclic plans and never modify files yourself.",
@@ -100,8 +100,8 @@ class PlanningAgent(StructuredAgent):
             failures=json.dumps(latest_report.model_dump(mode="json")),
             schema=json.dumps(Plan.model_json_schema()),
         )
-        if self.crew_executor is not None:
-            return self.crew_executor.run(
+        if self.executor is not None:
+            return self.executor.run(
                 role="Repository modernization replanner",
                 goal="Replace an ineffective plan with a safe, evidence-driven alternative.",
                 backstory="You learn from concrete test failures and do not repeat failed work.",

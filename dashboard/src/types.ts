@@ -51,9 +51,14 @@ export interface ProjectState {
   trace: TraceEvent[];
   final_status: FinalStatus | null;
   report_path: string | null;
+  /** Agent role -> runtime ("crewai" | "adk"); absent for runs saved before ADK support. */
+  agent_runtime?: Record<string, string>;
+  /** Mirror of the run's Google ADK session state. */
+  agent_session?: Record<string, unknown>;
 }
 
 export interface AnalysisReport {
+  languages?: string[];
   dependencies: DependencyFinding[];
   deprecated_patterns: DeprecatedPattern[];
   risks: string[];

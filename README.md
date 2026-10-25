@@ -1,9 +1,14 @@
 # ReForge
 
-ReForge is a multi-agent modernization and repair system for legacy Python
-repositories. It preserves observed behaviour by baselining tests before code
-changes, executes repository code only in Docker, and uses a deterministic
-orchestrator to manage agents, budgets, guards, checkpoints, and repairs.
+ReForge is a multi-agent modernization and repair system for legacy Python and
+JavaScript/TypeScript repositories. It preserves observed behaviour by
+baselining tests before code changes, executes repository code only in Docker,
+and uses a deterministic orchestrator to manage agents, budgets, guards,
+checkpoints, and repairs. Agents run on CrewAI, Google ADK, or both.
+
+See [docs/IMPLEMENTATION_NOTES.md](docs/IMPLEMENTATION_NOTES.md) for the
+security fixes, multi-language support, and CrewAI + ADK architecture added in
+October 2026.
 
 ## Development setup
 
@@ -39,6 +44,39 @@ parses dependency declarations from `requirements*.txt`, `pyproject.toml`,
 deprecation catalog; provides workspace-jailed repository and Git operations;
 and verifies candidate dependencies using `pip --dry-run` in the sandbox.
 
+## Supported repositories
+
+| Stack | Detection | Baseline tests | Deprecation rules |
+|---|---|---|---|
+| Python | `requirements*.txt`, `pyproject.toml`, `setup.py/cfg`, `Pipfile`, `test_*.py` | pytest (per-test ids via pytest-json-report), ruff, optional mypy | AST rules in `rules/python_deprecations.yaml` |
+| JavaScript / TypeScript | `package.json` (npm, pnpm, or yarn lockfile) | Jest, Vitest, or Mocha with JSON reporters (per-test ids); other `npm test` scripts as one coarse check; `npm run build` fallback; `tsc --noEmit` error count for TypeScript | Line rules in `rules/javascript_deprecations.yaml` (Node, React, jQuery, TypeScript) plus known-deprecated npm packages |
+| Polyglot (e.g. Python API + JS frontend) | both of the above | both suites run and are merged into one baseline | both catalogs |
+| Android (Java/Kotlin) | Gradle files | — | a narrow text rule set |
+
+Characterization tests are generated for Python (pytest) and for Jest/Vitest
+projects when the existing suite is missing or too small.
+
+## Agent runtimes: CrewAI and Google ADK
+
+`AGENT_FRAMEWORK` selects which runtime executes each reasoning agent. The
+orchestrator itself stays deterministic Python in every mode.
+
+| Mode | Analysis, planning | Transformation, repair, test generation |
+|---|---|---|
+| `crewai` | CrewAI | CrewAI |
+| `adk` | Google ADK | Google ADK |
+| `hybrid` (template default) | Google ADK | CrewAI |
+
+ADK agents run inside one ADK session per run. The session is created with the
+run's initial state, every orchestrator stage change and agent result is
+appended as an event with a `state_delta`, and each ADK agent reads that run
+memory through instruction templating. `GET /runs/{id}/session` returns the
+agent runtime per role and the session state; set `ADK_SESSION_DB_URL` to
+persist sessions in SQLite or another SQLAlchemy database.
+
+Supported providers: `openai`, `anthropic`, `gemini`, `ollama` (ADK uses Gemini
+natively and LiteLLM for the others).
+
 ## Human-in-the-loop operation
 
 To start a run, provide a repository URL or ZIP archive. The modernization
@@ -73,7 +111,13 @@ specification's default unprivileged `reforge` user.
 
 Each target command receives a disposable container with a read-only root
 filesystem, temporary writable storage, CPU, memory, and process limits, all
-Linux capabilities dropped, and `no-new-privileges` enabled. Test and lint
+Linux capabilities dropped, and `no-new-privileges` enabled. The workspace's
+`.git` directory is mounted read-only inside the sandbox, and every host-side
+Git command runs with hooks, `core.fsmonitor`, and external transports
+disabled, so repository content can never execute on the host through Git.
+Uploaded ZIPs are extracted without their `.git` directory, symlinks, or unsafe
+paths, within size and entry-count limits; `repo_url` accepts network Git URLs
+only. Test and lint
 commands have no network access; only the dependency-install phase may access
 the package network. The `REFORGE_SANDBOX_ROOT_FALLBACK=true` Compose setting
 is a logged Windows bind-mount compatibility exception, not the default.

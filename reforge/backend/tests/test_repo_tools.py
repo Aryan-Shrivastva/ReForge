@@ -56,7 +56,7 @@ def test_apply_patch_preserves_lf_bytes_for_git(monkeypatch: pytest.MonkeyPatch)
 
     assert len(calls) == 2
     assert all(call["input"] == patch.encode("utf-8") for call in calls)
-    assert all("text" not in call for call in calls)
+    assert all(not call.get("text") for call in calls)
 
 
 def test_normalise_unified_diff_hunks_corrects_only_miscounted_lengths() -> None:

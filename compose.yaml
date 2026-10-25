@@ -21,6 +21,9 @@ services:
       # image's unprivileged UID. This explicit, logged compatibility fallback
       # keeps root confined to the otherwise hardened sandbox container.
       REFORGE_SANDBOX_ROOT_FALLBACK: "true"
+      # Persist Google ADK sessions next to run state so session memory
+      # survives backend restarts (override in .env to change or disable).
+      ADK_SESSION_DB_URL: ${ADK_SESSION_DB_URL:-sqlite:////app/runs/adk_sessions.db}
     ports:
       - "8000:8000"
     volumes:

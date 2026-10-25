@@ -8,15 +8,16 @@ from reforge.backend.app.core.state import (
     TestReport as StateTestReport,
 )
 from reforge.backend.app.evaluation import Ablation, BenchmarkCatalog, BenchmarkRunner, evaluate_run, summarize_runs
-from reforge.backend.app.tools.ast_tools import RuleCatalog, scan_deprecated_patterns
+from reforge.backend.app.tools.ast_tools import RuleCatalog, scan_all_deprecated_patterns
 from reforge.backend.tests.conftest import make_state
 
 
 def test_catalog_discovers_the_required_controlled_coverage_cases() -> None:
     definitions = BenchmarkCatalog(Path("benchmarks")).list()
 
-    assert len(definitions) == 5
+    assert len(definitions) == 6
     assert {definition.name for definition in definitions} >= {
+        "node-legacy-app",
         "flask-legacy-app",
         "fastapi-pydantic-v1",
         "stdlib-deprecations",
@@ -28,7 +29,7 @@ def test_catalog_discovers_the_required_controlled_coverage_cases() -> None:
     for definition in definitions:
         observed = {
             (pattern.rule_id, pattern.file, pattern.line)
-            for pattern in scan_deprecated_patterns(definition.repository_path, rules)
+            for pattern in scan_all_deprecated_patterns(definition.repository_path, rules)
         }
         expected = {
             (pattern.rule_id, pattern.file, pattern.line)

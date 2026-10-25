@@ -5,20 +5,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..agents.analysis import AnalysisAgent, collect_analysis_evidence
+from ..agents.executor import AgentExecutors, TokenUsage, build_agent_executors
 from ..agents.planning import PlanningAgent, validate_plan
 from ..agents.repair import RepairAgent
 from ..agents.test_generation import CharacterizationTestGenerator
 from ..agents.testing import TestRunner
 from ..agents.transformation import TransformationAgent
-from ..agents.crewai_adapter import build_crewai_executor
 from ..core.config import Settings
 from ..core.guards import MutationGuards
 from ..core.state import (
     AnalysisReport,
     Budgets,
+    DeprecatedPattern,
     FinalStatus,
     Plan,
     ProjectState,
@@ -26,9 +27,10 @@ from ..core.state import (
     TestReport,
 )
 from ..reporting import ReportGenerator
-from ..tools.ast_tools import RuleCatalog, scan_android_deprecated_patterns, scan_deprecated_patterns
+from ..tools.ast_tools import RuleCatalog, scan_all_deprecated_patterns
 from ..tools.codemod_tools import CodemodTools
 from ..tools.git_tools import GitTools
+from ..tools.languages import is_test_file, iter_source_files
 from ..tools.repo_tools import RepositoryTools
 from ..tools.sandbox import DockerSandbox
 from .events import RunStateStore, TraceRecorder
@@ -39,6 +41,8 @@ DISCOVERY_OBJECTIVE = (
     "Analyze this repository, identify safe modernization opportunities, and propose a prioritized plan."
 )
 MAX_INFERRED_OBJECTIVE_LENGTH = 320
+GENERATED_TEST_PREFIX = "tests/reforge_generated/"
+_TEST_FILE_EXTENSIONS = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".java", ".kt")
 
 
 class TestingRunner(Protocol):
@@ -47,6 +51,17 @@ class TestingRunner(Protocol):
 
 class WorkflowError(RuntimeError):
     """Raised only for unrecoverable M5 workflow setup failures."""
+
+
+def budgets_from_settings(settings: Settings) -> Budgets:
+    """Translate environment/API settings into the per-run budgets the orchestrator enforces."""
+    return Budgets(
+        max_repairs=settings.max_repairs,
+        max_no_progress=settings.max_no_progress,
+        max_replans=settings.max_replans,
+        max_tokens=settings.max_tokens,
+        max_wall_clock_s=settings.max_wall_clock_s,
+    )
 
 
 class WorkflowRunner:
@@ -70,6 +85,8 @@ class WorkflowRunner:
         cancel_checker: Callable[[str], bool] | None = None,
         enable_codemods: bool = True,
         report_generator: ReportGenerator | None = None,
+        default_budgets: Budgets | None = None,
+        executors: AgentExecutors | None = None,
     ) -> None:
         self.analysis_agent = analysis_agent
         self.planning_agent = planning_agent
@@ -88,11 +105,13 @@ class WorkflowRunner:
         self.cancel_checker = cancel_checker
         self.enable_codemods = enable_codemods
         self.report_generator = report_generator or ReportGenerator(catalog)
+        self.default_budgets = default_budgets or Budgets()
+        self.executors = executors
 
     @classmethod
     def live(cls, settings: Settings, *, runs_root: Path = Path("runs")) -> "WorkflowRunner":
-        """Build the standard real-CrewAI, Docker-sandboxed M5 workflow."""
-        executor = build_crewai_executor(settings)
+        """Build the standard Docker-sandboxed workflow on the configured agent runtime(s)."""
+        executors = build_agent_executors(settings)
         catalog = RuleCatalog.from_yaml(
             Path(__file__).resolve().parents[1] / "rules" / "python_deprecations.yaml"
         )
@@ -105,11 +124,11 @@ class WorkflowRunner:
             )
 
         return cls(
-            analysis_agent=AnalysisAgent(crew_executor=executor),
-            planning_agent=PlanningAgent(crew_executor=executor),
-            transformation_agent=TransformationAgent(crew_executor=executor),
-            repair_agent=RepairAgent(crew_executor=executor),
-            test_generator=CharacterizationTestGenerator(crew_executor=executor),
+            analysis_agent=AnalysisAgent(executor=executors.analysis),
+            planning_agent=PlanningAgent(executor=executors.planning),
+            transformation_agent=TransformationAgent(executor=executors.transformation),
+            repair_agent=RepairAgent(executor=executors.repair),
+            test_generator=CharacterizationTestGenerator(executor=executors.test_generation),
             testing_runner_factory=lambda workspace: TestRunner(
                 sandbox_for(workspace), workspace, timeout_s=settings.sandbox_cmd_timeout_s
             ),
@@ -120,6 +139,8 @@ class WorkflowRunner:
             ),
             min_baseline_passing_tests=settings.min_baseline_passing_tests,
             allow_dependency_rollback_fallback=settings.allow_dependency_rollback_fallback,
+            default_budgets=budgets_from_settings(settings),
+            executors=executors,
         )
 
     def initialize(
@@ -143,10 +164,11 @@ class WorkflowRunner:
             workspace_path=str(workspace.resolve()),
             work_branch=f"reforge/{run_id}",
             base_commit=git.current_commit(),
-            budgets=budgets or Budgets(),
+            budgets=budgets or self.default_budgets.model_copy(),
         )
         state.best_commit = state.base_commit
         git.create_branch(state.work_branch)
+        self._bind_agent_sessions(state)
         self._record(state, "orchestrator", "start", "Run initialized; working branch created.")
         return state
 
@@ -156,6 +178,8 @@ class WorkflowRunner:
         workspace = Path(state.workspace_path)
         if not workspace.is_dir():
             raise WorkflowError(f"workspace does not exist: {workspace}")
+        if not state.agent_runtime and self.executors is not None:
+            self._bind_agent_sessions(state)
         if state.stage is Stage.INIT:
             self._transition(state, TransitionSignal.INITIALIZED, "Workspace is ready for analysis.")
         guards: MutationGuards | None = None
@@ -206,24 +230,7 @@ class WorkflowRunner:
                     else:
                         self._transition(state, TransitionSignal.TRANSFORM_COMPLETE, "All independent plan steps attempted.")
                 elif state.stage is Stage.TEST:
-                    phase = "post_repair" if state.repairs and state.repairs[-1].failing_after is None else "post_transform"
-                    report = self._run_tests(state, workspace, phase)
-                    state.test_runs.append(report)
-                    if state.repairs and state.repairs[-1].failing_after is None:
-                        state.repairs[-1].failing_after = Orchestrator.failure_count(
-                            report, state.baseline_pass_set
-                        )
-                        if state.repairs[-1].failing_after < state.repairs[-1].failing_before:
-                            state.best_commit = self.git_factory(workspace).current_commit()
-                    if self._has_unapplied_plan_steps(state):
-                        self._report_partial(
-                            state,
-                            "Some planned modernization steps were not applied; baseline verification passed, but the run is incomplete.",
-                        )
-                    elif self._meets_success_criteria(state, report, workspace):
-                        self._transition(state, TransitionSignal.TEST_PASSED, "All M6 success criteria met.")
-                    else:
-                        self._route_test_failure(state)
+                    self._evaluate_tests(state, workspace)
                 elif state.stage is Stage.REPAIR:
                     if self.repair_agent is None or guards is None or state.plan is None:
                         raise WorkflowError("repair stage requires a repair agent, plan, and initialized guards")
@@ -266,22 +273,140 @@ class WorkflowRunner:
                 self._transition(state, TransitionSignal.REPORT_WRITTEN, "Final Markdown and JSON reports written.")
             except Exception as exc:  # Preserve terminal run state even if its presentation artifact fails.
                 self._record(state, "reporting", "error", f"Final report generation failed: {type(exc).__name__}: {exc}")
+        self._sync_agent_sessions(state)
         self.state_store.save(state)
         return state
 
+    def _evaluate_tests(self, state: ProjectState, workspace: Path) -> None:
+        """Run the post-change suite and route on what it actually shows.
+
+        Regressions are checked before plan completeness: a run whose applied
+        steps broke frozen baseline tests must go to repair, never be reported
+        as a PARTIAL "baseline preserved" result.
+        """
+        post_repair = bool(state.repairs and state.repairs[-1].failing_after is None)
+        report = self._run_tests(state, workspace, "post_repair" if post_repair else "post_transform")
+        state.test_runs.append(report)
+        if post_repair:
+            state.repairs[-1].failing_after = Orchestrator.failure_count(report, state.baseline_pass_set)
+            if state.repairs[-1].failing_after < state.repairs[-1].failing_before:
+                state.best_commit = self.git_factory(workspace).current_commit()
+
+        regressions = self._regressions(state, report)
+        if self._meets_success_criteria(state, report, workspace):
+            self._transition(state, TransitionSignal.TEST_PASSED, "All M6 success criteria met.")
+        elif regressions:
+            self._record(
+                state, "testing", "decision", "Post-change run regressed the frozen baseline.",
+                {"regressions": regressions[:50], "count": len(regressions)},
+            )
+            self._route_test_failure(state)
+        elif self._has_unapplied_plan_steps(state):
+            unapplied = [step.id for step in state.plan.steps if step.status != "applied"] if state.plan else []
+            self._report_partial(
+                state,
+                "Applied steps preserved every frozen baseline test, but some planned modernization steps were not "
+                "applied; the run is incomplete.",
+                {"unapplied_steps": unapplied},
+            )
+        else:
+            self._route_test_failure(state)
+
     def _agent_call(self, state: ProjectState, name: str, call: Callable[[], object]) -> object:
-        self._record(state, name, "start", f"{name} agent started.")
+        self._record(state, name, "start", f"{name} agent started.", {"framework": state.agent_runtime.get(name)})
         state.metrics.agent_calls[name] = state.metrics.agent_calls.get(name, 0) + 1
         last_error: Exception | None = None
-        for attempt in range(2):
+        try:
+            for attempt in range(2):
+                before = self._executor_usage()
+                try:
+                    value = call()
+                    self._record(state, name, "result", f"{name} agent returned validated output.")
+                    return value
+                except Exception as exc:
+                    last_error = exc
+                    self._record(state, name, "error", f"{name} agent attempt {attempt + 1} failed: {exc}")
+                finally:
+                    self._account_tokens(state, before)
+            raise WorkflowError(f"{name} agent failed after one retry: {last_error}")
+        finally:
+            self._sync_agent_sessions(state)
+            self._enforce_token_budget(state)
+
+    def _executor_usage(self) -> TokenUsage:
+        return self.executors.usage() if self.executors is not None else TokenUsage()
+
+    def _account_tokens(self, state: ProjectState, before: TokenUsage) -> None:
+        after = self._executor_usage()
+        state.metrics.tokens_in += max(after.prompt_tokens - before.prompt_tokens, 0)
+        state.metrics.tokens_out += max(after.completion_tokens - before.completion_tokens, 0)
+
+    def _enforce_token_budget(self, state: ProjectState) -> None:
+        used = state.metrics.tokens_in + state.metrics.tokens_out
+        if used > state.budgets.max_tokens and state.final_status is None:
+            Orchestrator.transition(state, TransitionSignal.BUDGET_EXCEEDED)
+            self._record(
+                state, "orchestrator", "decision", "Token budget exceeded.",
+                {"tokens_used": used, "max_tokens": state.budgets.max_tokens},
+            )
+            raise WorkflowError("token budget exceeded")
+
+    def _bind_agent_sessions(self, state: ProjectState) -> None:
+        """Record which runtime runs each agent and open ADK sessions with initial run state."""
+        if self.executors is None:
+            return
+        state.agent_runtime = self.executors.frameworks()
+        for executor in self.executors.session_executors():
+            executor.bind_run(state.run_id, self._session_snapshot(state))
+        self._sync_agent_sessions(state, push=False)
+
+    def _sync_agent_sessions(self, state: ProjectState, *, push: bool = True) -> None:
+        """Push orchestrator facts into ADK session state and mirror it back into the run record."""
+        if self.executors is None:
+            return
+        for executor in self.executors.session_executors():
             try:
-                value = call()
-                self._record(state, name, "result", f"{name} agent returned validated output.")
-                return value
-            except Exception as exc:
-                last_error = exc
-                self._record(state, name, "error", f"{name} agent attempt {attempt + 1} failed: {exc}")
-        raise WorkflowError(f"{name} agent failed after one retry: {last_error}")
+                if push:
+                    executor.update_run_state(self._session_snapshot(state))
+                state.agent_session = executor.run_state()
+            except Exception as exc:  # Session memory is advisory; never fail a run over it.
+                TraceRecorder.add(
+                    state, agent="orchestrator", kind="error",
+                    summary=f"ADK session state sync failed: {type(exc).__name__}: {exc}",
+                )
+
+    @staticmethod
+    def _session_snapshot(state: ProjectState) -> dict[str, Any]:
+        """Compact, JSON-safe run memory written into ADK session state."""
+        analysis = state.analysis
+        plan = state.plan
+        return {
+            "run_id": state.run_id,
+            "repository": state.repo_source,
+            "objective": state.objective,
+            "objective_origin": state.objective_origin,
+            "stage": state.stage.value,
+            "final_status": state.final_status.value if state.final_status else "",
+            "languages": ", ".join(analysis.languages) if analysis else "",
+            "analysis_summary": (
+                f"{analysis.summary} ({len(analysis.dependencies)} dependencies, "
+                f"{len(analysis.deprecated_patterns)} deprecated patterns, "
+                f"{analysis.tests.test_count} tests via {analysis.tests.framework or 'unknown'})"
+                if analysis else ""
+            ),
+            "plan_summary": (
+                f"v{plan.version}: " + "; ".join(f"{step.id} [{step.status}] {step.title}" for step in plan.steps)
+                if plan else ""
+            ),
+            "repair_history": "; ".join(
+                f"R{repair.iteration} {repair.root_cause_category}: {repair.diagnosis[:160]} "
+                f"(failing {repair.failing_before} -> {repair.failing_after if repair.failing_after is not None else '?'})"
+                for repair in state.repairs
+            ),
+            "replans": state.replans,
+            "baseline_passing": len(state.baseline_pass_set),
+            "tokens_used": state.metrics.tokens_in + state.metrics.tokens_out,
+        }
 
     def _establish_baseline(self, state: ProjectState, workspace: Path) -> None:
         """Freeze existing behavior, supplementing it only with passing generated tests."""
@@ -304,7 +429,7 @@ class WorkflowRunner:
                 generated_failures = [
                     failure
                     for failure in [*candidate.failed, *candidate.errored]
-                    if (failure.file or "").startswith("tests/reforge_generated/")
+                    if (failure.file or failure.test_id).startswith(GENERATED_TEST_PREFIX)
                 ]
                 generated_passes = self._generated_test_passes(candidate)
                 if candidate.install_ok and generated_passes and not generated_failures:
@@ -328,7 +453,7 @@ class WorkflowRunner:
         if not report.install_ok or not state.baseline_pass_set:
             self._report_failure(state, "No usable baseline: install failed or no tests passed.")
             return
-        generated_files = [path for path in state.protected_test_files if path.startswith("tests/reforge_generated/")]
+        generated_files = [path for path in state.protected_test_files if path.startswith(GENERATED_TEST_PREFIX)]
         git = self.git_factory(workspace)
         if generated_files:
             git.commit("Baseline characterization tests", generated_files)
@@ -447,6 +572,9 @@ class WorkflowRunner:
             for finding in analysis.dependencies
             if finding.status in {"outdated", "deprecated", "incompatible"} and finding.target
         ]
+        deprecated_packages = [
+            finding.name for finding in analysis.dependencies if finding.status == "deprecated" and not finding.target
+        ]
         if upgrade_targets:
             rendered = ", ".join(
                 f"{item.name} to {item.target}" for item in upgrade_targets[:3]
@@ -455,6 +583,11 @@ class WorkflowRunner:
         elif analysis.deprecated_patterns:
             rules = ", ".join(sorted({item.rule_id for item in analysis.deprecated_patterns})[:3])
             objective = f"Replace the detected deprecated API patterns ({rules}) and validate preserved behavior."
+        elif deprecated_packages:
+            objective = (
+                f"Replace the deprecated package(s) {', '.join(sorted(deprecated_packages)[:3])} with maintained "
+                "alternatives and validate preserved behavior."
+            )
         elif analysis.python_version_target:
             objective = (
                 f"Modernize compatibility for Python {analysis.python_version_target} and validate preserved behavior."
@@ -477,11 +610,11 @@ class WorkflowRunner:
 
     @staticmethod
     def _generated_test_passes(report: TestReport) -> list[str]:
-        """Return collected passing node IDs from the generated-test directory only."""
+        """Return collected passing test IDs from the generated-test directory only."""
         return [
             test_id
             for test_id in report.passed
-            if test_id.split("::", 1)[0].startswith("tests/reforge_generated/")
+            if test_id.split("::", 1)[0].startswith(GENERATED_TEST_PREFIX)
         ]
 
     def _run_tests(self, state: ProjectState, workspace: Path, phase: str) -> TestReport:
@@ -512,6 +645,7 @@ class WorkflowRunner:
             summary,
             {"from": previous.value, "to": state.stage.value, "signal": signal.value},
         )
+        self._sync_agent_sessions(state)
 
     def _record(
         self,
@@ -545,24 +679,37 @@ class WorkflowRunner:
 
     @staticmethod
     def _protected_test_files(state: ProjectState, workspace: Path) -> list[str]:
+        """Freeze every test file in any supported language, plus files of passing baseline tests."""
         files = set(state.analysis.tests.test_files if state.analysis else [])
         for test_id in state.baseline_pass_set:
             if "::" in test_id:
                 files.add(test_id.split("::", 1)[0])
-        tests_root = workspace / "tests"
-        if tests_root.is_dir():
-            files.update(path.relative_to(workspace).as_posix() for path in tests_root.rglob("*.py"))
+        root = workspace.resolve()
+        for path in iter_source_files(root, _TEST_FILE_EXTENSIONS):
+            relative = path.relative_to(root).as_posix()
+            if is_test_file(relative) or relative.startswith("tests/"):
+                files.add(relative)
         return sorted(files)
 
+    @staticmethod
+    def _regressions(state: ProjectState, report: TestReport) -> list[str]:
+        """Frozen baseline tests that no longer pass, new errors, or a failed install."""
+        if not report.install_ok:
+            return ["<install>"]
+        passed = set(report.passed)
+        missing = [test_id for test_id in state.baseline_pass_set if test_id not in passed]
+        baseline_errors = {failure.test_id for failure in (state.baseline.errored if state.baseline else [])}
+        new_errors = [failure.test_id for failure in report.errored if failure.test_id not in baseline_errors]
+        return [*missing, *[test_id for test_id in new_errors if test_id not in missing]]
+
     def _meets_success_criteria(self, state: ProjectState, report: TestReport, workspace: Path) -> bool:
+        """Specification Section 7: all five success criteria must hold."""
         baseline = state.baseline
         if baseline is None or not report.install_ok:
             return False
         if self._has_unapplied_plan_steps(state):
             return False
-        if not set(state.baseline_pass_set).issubset(report.passed):
-            return False
-        if report.errored:
+        if self._regressions(state, report):
             return False
         if baseline.lint_issues is not None and report.lint_issues is not None:
             if report.lint_issues > baseline.lint_issues:
@@ -570,11 +717,30 @@ class WorkflowRunner:
         if baseline.typecheck_errors is not None and report.typecheck_errors is not None:
             if report.typecheck_errors > baseline.typecheck_errors:
                 return False
-        remaining = [
-            *scan_deprecated_patterns(workspace.resolve(), self.catalog),
-            *scan_android_deprecated_patterns(workspace.resolve()),
+        return not self.remaining_targeted_patterns(state, workspace)
+
+    def remaining_targeted_patterns(self, state: ProjectState, workspace: Path) -> list[DeprecatedPattern]:
+        """Deprecated patterns the plan was responsible for, plus any the run introduced.
+
+        A pattern is *targeted* when it lies in a file an applied plan step
+        declared.  Patterns elsewhere that already existed at analysis time
+        are out of the objective's scope and must not block SUCCESS.  Patterns
+        absent from the analysis baseline were introduced by this run and
+        always count, wherever they are.
+        """
+        current = scan_all_deprecated_patterns(workspace.resolve(), self.catalog)
+        plan_files = {
+            file for step in (state.plan.steps if state.plan else []) if step.status == "applied" for file in step.files
+        }
+        known = {
+            (pattern.rule_id, pattern.file, pattern.snippet.strip())
+            for pattern in (state.analysis.deprecated_patterns if state.analysis else [])
+        }
+        return [
+            pattern
+            for pattern in current
+            if pattern.file in plan_files or (pattern.rule_id, pattern.file, pattern.snippet.strip()) not in known
         ]
-        return not remaining
 
     @staticmethod
     def _has_unapplied_plan_steps(state: ProjectState) -> bool:
@@ -585,17 +751,18 @@ class WorkflowRunner:
             Orchestrator.transition(state, TransitionSignal.CANCELLED)
             self._record(state, "orchestrator", "decision", "Run cancelled by API request.")
             raise WorkflowError("run cancelled")
-        if monotonic() - started > state.budgets.max_wall_clock_s:
+        if monotonic() - started + state.metrics.wall_clock_s > state.budgets.max_wall_clock_s:
             Orchestrator.transition(state, TransitionSignal.BUDGET_EXCEEDED)
             self._record(state, "orchestrator", "decision", "Wall-clock budget exceeded.")
             raise WorkflowError("wall-clock budget exceeded")
+        self._enforce_token_budget(state)
 
     def _report_failure(self, state: ProjectState, summary: str) -> None:
         state.stage = Stage.REPORT
         state.final_status = FinalStatus.FAILED
         self._record(state, "orchestrator", "error", summary)
 
-    def _report_partial(self, state: ProjectState, summary: str) -> None:
+    def _report_partial(self, state: ProjectState, summary: str, data: dict[str, object] | None = None) -> None:
         state.stage = Stage.REPORT
         state.final_status = FinalStatus.PARTIAL
-        self._record(state, "orchestrator", "decision", summary)
+        self._record(state, "orchestrator", "decision", summary, data)

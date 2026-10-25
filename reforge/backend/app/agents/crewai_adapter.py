@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from ..core.config import Settings
 from ..llm import LLMConfigurationError
+from .executor import TokenUsage
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -63,13 +64,33 @@ def _load_crewai(storage_root: Path | None = None) -> CrewAIComponents:
     os.environ["TMP"] = str(temporary_root)
     tempfile.tempdir = str(temporary_root)
 
-    import appdirs
-    from crewai_core import settings as crewai_settings
+    try:
+        from crewai_core import settings as crewai_settings
+    except ImportError:  # pragma: no cover - older/newer CrewAI layouts.
+        crewai_settings = None
+    if crewai_settings is not None:
+        # CrewAI otherwise probes the user's profile directory before its
+        # project temp fallback. Point that probe at the local runtime root.
+        crewai_settings.DEFAULT_CONFIG_PATH = root / "config" / "settings.json"
 
-    # CrewAI otherwise probes the user's profile directory before its project
-    # temp fallback. Point that probe at the same local runtime root first.
-    crewai_settings.DEFAULT_CONFIG_PATH = root / "config" / "settings.json"
+    try:
+        import appdirs
+    except ImportError:
+        # appdirs is only needed to redirect CrewAI's Windows app-data folder;
+        # CrewAI versions that no longer use it work without the patch.
+        appdirs = None
+    if appdirs is not None:
+        _patch_appdirs(appdirs, root)
+    try:
+        from crewai import Agent, Crew, LLM, Process, Task
+    except ImportError as exc:  # pragma: no cover - installation failure is environment-specific.
+        raise CrewAIExecutionError(
+            "CrewAI is unavailable. Install the project dependencies before starting a run."
+        ) from exc
+    return CrewAIComponents(Agent=Agent, Crew=Crew, Task=Task, Process=Process, LLM=LLM)
 
+
+def _patch_appdirs(appdirs: Any, root: Path) -> None:
     original_user_data_dir = appdirs.user_data_dir
 
     def reforge_user_data_dir(
@@ -88,28 +109,24 @@ def _load_crewai(storage_root: Path | None = None) -> CrewAIComponents:
         return original_user_data_dir(appname, appauthor, version, roaming)
 
     appdirs.user_data_dir = reforge_user_data_dir
-    try:
-        from crewai import Agent, Crew, LLM, Process, Task
-    except ImportError as exc:  # pragma: no cover - installation failure is environment-specific.
-        raise CrewAIExecutionError(
-            "CrewAI is unavailable. Install the project dependencies before starting a run."
-        ) from exc
-    return CrewAIComponents(Agent=Agent, Crew=Crew, Task=Task, Process=Process, LLM=LLM)
 
 
 @dataclass(slots=True)
 class CrewAIExecutor:
     """Execute one bounded, sequential CrewAI task with a typed result."""
 
+    framework: ClassVar[str] = "crewai"
+
     provider: str
     model: str
     temperature: float = 0.1
     storage_root: Path | None = None
     component_loader: Callable[[Path | None], CrewAIComponents] = _load_crewai
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
     def __post_init__(self) -> None:
-        if self.provider not in {"openai", "anthropic", "ollama"}:
-            raise ValueError("provider must be openai, anthropic, or ollama")
+        if self.provider not in {"openai", "anthropic", "ollama", "gemini"}:
+            raise ValueError("provider must be openai, anthropic, ollama, or gemini")
         if not self.model.strip():
             raise ValueError("model must not be empty")
         if not 0 <= self.temperature <= 2:
@@ -174,6 +191,12 @@ class CrewAIExecutor:
                 share_crew=False,
             )
             output = crew.kickoff()
+            token_usage = getattr(output, "token_usage", None)
+            if token_usage is not None:
+                self.usage.add(
+                    getattr(token_usage, "prompt_tokens", 0),
+                    getattr(token_usage, "completion_tokens", 0),
+                )
             structured = getattr(output, "pydantic", None)
             value = output_model.model_validate(
                 structured.model_dump() if isinstance(structured, BaseModel) else structured

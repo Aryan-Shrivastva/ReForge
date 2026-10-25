@@ -153,7 +153,7 @@ function RunView({ view, state, onError }: { view: Exclude<View, "benchmarks">; 
 }
 
 function Overview({ state }: { state: ProjectState }) {
-  return <div className="stack"><Pipeline state={state} /><div className="metric-grid"><Metric label="Baseline tests" value={String(state.baseline_pass_set.length)} /><Metric label="Repairs" value={String(state.repairs.length)} /><Metric label="Replans" value={String(state.replans)} /><Metric label="Wall clock" value={`${state.metrics.wall_clock_s.toFixed(1)}s`} /></div><section className="card"><h2>Live decision</h2><p>{state.trace.at(-1)?.summary ?? "The run is queued."}</p></section></div>;
+  return <div className="stack"><Pipeline state={state} /><div className="metric-grid"><Metric label="Baseline tests" value={String(state.baseline_pass_set.length)} /><Metric label="Repairs" value={String(state.repairs.length)} /><Metric label="Replans" value={String(state.replans)} /><Metric label="Wall clock" value={`${state.metrics.wall_clock_s.toFixed(1)}s`} /><Metric label="Tokens" value={`${(state.metrics.tokens_in + state.metrics.tokens_out).toLocaleString()} / ${(state.budgets.max_tokens ?? 0).toLocaleString()}`} /></div><section className="card"><h2>Live decision</h2><p>{state.trace.at(-1)?.summary ?? "The run is queued."}</p></section><AgentRuntime state={state} /></div>;
 }
 
 function Pipeline({ state }: { state: ProjectState }) {
@@ -164,7 +164,7 @@ function Pipeline({ state }: { state: ProjectState }) {
 function Analysis({ state }: { state: ProjectState }) {
   const analysis = state.analysis;
   if (!analysis) return <Pending label="Analysis" />;
-  return <div className="stack"><section className="card"><h2>Analysis summary</h2><p>{analysis.summary}</p>{analysis.risks.length > 0 && <p className="risk">Risks: {analysis.risks.join(" · ")}</p>}</section><Table headers={["Dependency", "Current", "Target", "Status", "Reason"]} rows={analysis.dependencies.map((item) => [item.name, item.current ?? "—", item.target ?? "—", item.status, item.reason])} /><Table headers={["Rule", "Location", "Snippet", "Replacement"]} rows={analysis.deprecated_patterns.map((item) => [item.rule_id, `${item.file}:${item.line}`, item.snippet, item.replacement_hint])} empty="No targeted deprecated patterns found." /></div>;
+  return <div className="stack"><section className="card"><h2>Analysis summary</h2>{analysis.languages && analysis.languages.length > 0 && <p className="muted">Languages: {analysis.languages.join(" · ")}</p>}<p>{analysis.summary}</p>{analysis.risks.length > 0 && <p className="risk">Risks: {analysis.risks.join(" · ")}</p>}</section><Table headers={["Dependency", "Current", "Target", "Status", "Reason"]} rows={analysis.dependencies.map((item) => [item.name, item.current ?? "—", item.target ?? "—", item.status, item.reason])} /><Table headers={["Rule", "Location", "Snippet", "Replacement"]} rows={analysis.deprecated_patterns.map((item) => [item.rule_id, `${item.file}:${item.line}`, item.snippet, item.replacement_hint])} empty="No targeted deprecated patterns found." /></div>;
 }
 
 function Plan({ state }: { state: ProjectState }) {
@@ -235,6 +235,16 @@ function Benchmarks({ onError }: { onError: (value: string) => void }) {
 
 function Table({ headers, rows, empty }: { headers: string[]; rows: string[][]; empty?: string }) {
   return <section className="card table-card"><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{rows.length ? rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>) : <tr><td colSpan={headers.length} className="muted">{empty ?? "No data yet."}</td></tr>}</tbody></table></section>;
+}
+
+const SESSION_KEYS = ["stage", "objective", "languages", "plan_summary", "repair_history", "agent_calls", "agent_history"];
+
+function AgentRuntime({ state }: { state: ProjectState }) {
+  const runtime = Object.entries(state.agent_runtime ?? {});
+  if (!runtime.length) return null;
+  const session = state.agent_session ?? {};
+  const sessionRows = SESSION_KEYS.filter((key) => session[key] !== undefined && session[key] !== "").map((key) => [key, String(session[key])]);
+  return <section className="card"><div className="section-heading"><div><p className="eyebrow">CrewAI + Google ADK</p><h2>Agent runtime</h2></div></div><div className="metric-grid">{runtime.map(([role, framework]) => <Metric key={role} label={role.replace("_", " ")} value={framework.toUpperCase()} />)}</div>{sessionRows.length > 0 && <><h3>ADK session state</h3><dl className="session-state">{sessionRows.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></>}</section>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <article className="metric"><span>{label}</span><strong>{value}</strong></article>; }

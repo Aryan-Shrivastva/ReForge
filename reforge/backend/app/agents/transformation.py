@@ -13,7 +13,7 @@ from ..tools.codemod_tools import Codemod, CodemodTools
 from ..tools.git_tools import GitTools
 from ..tools.repo_tools import RepositoryTools, normalise_unified_diff_hunks
 from .base import StructuredAgent
-from .crewai_adapter import CrewAIExecutor
+from .executor import AgentExecutor
 from .prompts import TRANSFORMATION_PROMPT
 
 
@@ -34,14 +34,14 @@ class TransformationAgent(StructuredAgent):
         self,
         llm: LLMClient | None = None,
         *,
-        crew_executor: CrewAIExecutor | None = None,
+        executor: AgentExecutor | None = None,
         max_retries: int = 2,
         repository_factory: Callable[[Path], RepositoryTools] = RepositoryTools,
         git_factory: Callable[[Path], GitTools] = GitTools,
     ) -> None:
-        if (llm is None) == (crew_executor is None):
-            raise ValueError("provide exactly one of llm or crew_executor")
-        self.crew_executor = crew_executor
+        if (llm is None) == (executor is None):
+            raise ValueError("provide exactly one of llm or executor")
+        self.executor = executor
         self.repository_factory = repository_factory
         self.git_factory = git_factory
         if llm is not None:
@@ -102,8 +102,8 @@ class TransformationAgent(StructuredAgent):
         )
 
     def _complete_proposal(self, prompt: str) -> TransformationProposal:
-        if self.crew_executor is not None:
-            return self.crew_executor.run(
+        if self.executor is not None:
+            return self.executor.run(
                 role="Repository modernization transformer",
                 goal="Produce a minimal, scoped modernization patch.",
                 backstory="You never alter tests and only propose patches; deterministic tools apply them.",

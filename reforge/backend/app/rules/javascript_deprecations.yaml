@@ -1,0 +1,67 @@
+# Text rules for JavaScript/TypeScript sources.  Each `pattern` is a Python
+# regular expression applied per line (comments are not stripped, so keep
+# patterns specific).  Rules report only what they can point to in source.
+# Patterns containing quotes use literal block scalars (|-) so no YAML
+# escaping is needed.  `extensions` optionally narrows a rule's file types.
+rules:
+  - id: node-buffer-constructor
+    pattern: '(?<![\w.$])new\s+Buffer\s*\('
+    replacement_hint: "new Buffer() is deprecated (DEP0005); use Buffer.from(), Buffer.alloc(), or Buffer.allocUnsafe()."
+  - id: node-url-parse
+    pattern: '(?<![\w$])url\.parse\s*\('
+    replacement_hint: "url.parse() is deprecated (DEP0169); use the WHATWG URL API: new URL(input, base)."
+  - id: node-fs-exists
+    pattern: '(?<![\w$])fs\.exists\s*\('
+    replacement_hint: "fs.exists() is deprecated (DEP0034); use fs.stat()/fs.access() or fs.existsSync()."
+  - id: node-util-is-type
+    pattern: '(?<![\w$])util\.(?:isArray|isBoolean|isBuffer|isDate|isError|isFunction|isNull|isNullOrUndefined|isNumber|isObject|isPrimitive|isRegExp|isString|isSymbol|isUndefined)\s*\('
+    replacement_hint: "util.is*() type checks are deprecated; use Array.isArray, typeof, instanceof, or util.types."
+  - id: node-util-log
+    pattern: '(?<![\w$])util\.(?:log|print|puts|debug|error|pump)\s*\('
+    replacement_hint: "Legacy util logging helpers are deprecated or removed; use console methods."
+  - id: node-crypto-create-cipher
+    pattern: '(?<![\w$])crypto\.create(?:Cipher|Decipher)\s*\('
+    replacement_hint: "crypto.createCipher/createDecipher were removed (DEP0106); use createCipheriv/createDecipheriv with an explicit IV."
+  - id: node-domain-module
+    pattern: |-
+      require\(\s*['"](?:node:)?domain['"]\s*\)|from\s+['"](?:node:)?domain['"]
+    replacement_hint: "The domain module is deprecated (DEP0032); use AsyncLocalStorage or explicit error handling."
+  - id: npm-request-package
+    pattern: |-
+      require\(\s*['"]request(?:-promise(?:-native)?)?['"]\s*\)|from\s+['"]request(?:-promise(?:-native)?)?['"]
+    replacement_hint: "The request package is deprecated; use the global fetch API (Node 18+) or a maintained client such as undici or axios."
+  - id: js-string-substr
+    pattern: '\.substr\s*\('
+    replacement_hint: "String.prototype.substr is a legacy Annex B API; use slice() or substring()."
+  - id: react-dom-render
+    pattern: '(?<![\w$])ReactDOM\.(?:render|hydrate)\s*\('
+    replacement_hint: "ReactDOM.render/hydrate were removed in React 19; use createRoot(...).render() or hydrateRoot() from react-dom/client."
+  - id: react-unsafe-lifecycle
+    pattern: '(?<![\w$])(?:componentWillMount|componentWillReceiveProps|componentWillUpdate)\s*\('
+    replacement_hint: "Legacy React lifecycles are unsafe; use componentDidMount, getDerivedStateFromProps, or componentDidUpdate (or hooks)."
+  - id: react-find-dom-node
+    pattern: '(?<![\w$])(?:ReactDOM\.)?findDOMNode\s*\('
+    replacement_hint: "findDOMNode was removed in React 19; attach a ref to the DOM element instead."
+  - id: react-string-refs
+    pattern: |-
+      \bref\s*=\s*["'][A-Za-z_$][\w$]*["']
+    replacement_hint: "String refs were removed in React 19; use useRef/createRef or a callback ref."
+    extensions: [".jsx", ".tsx"]
+  - id: react-prop-types-on-react
+    pattern: '(?<![\w$])React\.PropTypes\b'
+    replacement_hint: "React.PropTypes was removed; import PropTypes from the prop-types package or use TypeScript types."
+  - id: react-create-class
+    pattern: '(?<![\w$])React\.createClass\s*\('
+    replacement_hint: "React.createClass was removed; use an ES class component or a function component."
+  - id: jquery-legacy-events
+    pattern: |-
+      \.(?:bind|unbind|delegate|undelegate|live|die)\s*\(\s*['"]
+    replacement_hint: "Legacy jQuery event APIs are deprecated; use .on() and .off()."
+  - id: moment-package
+    pattern: |-
+      require\(\s*['"]moment['"]\s*\)|from\s+['"]moment['"]
+    replacement_hint: "moment is in maintenance mode; prefer Intl/Temporal, date-fns, Luxon, or Day.js."
+  - id: ts-namespace-module-keyword
+    pattern: '^\s*(?:export\s+)?(?:declare\s+)?module\s+[A-Za-z_$][\w$.]*\s*\{'
+    replacement_hint: "The `module Foo {}` keyword form is deprecated in TypeScript 5; use `namespace Foo {}` or ES modules."
+    extensions: [".ts", ".tsx", ".mts", ".cts"]
