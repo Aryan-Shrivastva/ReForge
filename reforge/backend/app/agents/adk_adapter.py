@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -38,8 +39,11 @@ from .executor import TokenUsage
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
+# The ADK dev UI (`adk web`, see adk_apps/) lists sessions for the app named
+# after its agent folder and for user "user"; matching both makes every
+# ReForge run session browsable there.
 APP_NAME = "reforge"
-USER_ID = "reforge"
+USER_ID = "user"
 
 # Session-state keys rendered into every agent instruction.  The ``?`` suffix
 # makes ADK substitute an empty string when a key has not been written yet.
@@ -64,6 +68,24 @@ class ADKComponents:
     EventActions: type[Any]
     LiteLlm: type[Any] | None
     types: Any
+
+
+class _SharedSessionAuthorFilter(logging.Filter):
+    """Drop ADK's "unknown agent" warning, which is expected in a shared run session.
+
+    Each ReForge call runs a fresh single-agent ``Runner`` on the run's
+    session, whose earlier events were written by other agents and by the
+    orchestrator.  ADK logs every such author while choosing the agent to
+    resume, then correctly falls back to the root agent.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("Event from an unknown agent")
+
+
+_ADK_RUNNER_LOGGER = logging.getLogger("google_adk.google.adk.runners")
+if not any(isinstance(item, _SharedSessionAuthorFilter) for item in _ADK_RUNNER_LOGGER.filters):
+    _ADK_RUNNER_LOGGER.addFilter(_SharedSessionAuthorFilter())
 
 
 def _load_adk() -> ADKComponents:

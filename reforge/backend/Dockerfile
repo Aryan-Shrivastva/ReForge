@@ -11,6 +11,8 @@ COPY pyproject.toml README.md ./
 RUN mkdir -p reforge/backend/app && touch reforge/backend/app/__init__.py
 RUN --mount=type=cache,target=/root/.cache/pip pip install .
 COPY reforge ./reforge
+# ADK dev UI app that browses run sessions (adk-web service in compose.yaml).
+COPY adk_apps ./adk_apps
 # Controlled fixtures are part of the API's benchmark catalog.  Keep them in
 # the runtime image so /benchmarks and /benchmarks/run work after deployment.
 COPY benchmarks ./benchmarks

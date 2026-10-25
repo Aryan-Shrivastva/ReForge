@@ -7,6 +7,7 @@ services:
     restart: "no"
 
   backend:
+    image: reforge-backend
     build:
       context: .
       dockerfile: reforge/backend/Dockerfile
@@ -14,8 +15,8 @@ services:
       - .env
     environment:
       REFORGE_CONTAINER_RUNS_ROOT: /app/runs
-      # Set REFORGE_DOCKER_HOST_RUNS_ROOT to your absolute host runs path when
-      # using Docker Desktop; this lets the sibling sandbox mount each run.
+      # Sibling sandbox containers need the *host* path of ./runs. The backend
+      # detects it from its own mounts; set this only to override detection.
       REFORGE_DOCKER_HOST_RUNS_ROOT: ${REFORGE_DOCKER_HOST_RUNS_ROOT:-}
       # Docker Desktop bind mounts on some Windows hosts deny writes from the
       # image's unprivileged UID. This explicit, logged compatibility fallback
@@ -32,6 +33,31 @@ services:
     depends_on:
       sandbox-image:
         condition: service_completed_successfully
+
+  # Google ADK's developer web UI, browsing the same ADK session database the
+  # backend writes: each run's session, its event timeline, and state deltas.
+  # Open http://127.0.0.1:8001/dev-ui/?app=reforge (pick a run's session there).
+  adk-web:
+    image: reforge-backend
+    # Built by the backend service; never pull it from a registry.
+    pull_policy: never
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+    command:
+      - adk
+      - web
+      - --host=0.0.0.0
+      - --port=8001
+      - --session_service_uri=${ADK_SESSION_DB_URL:-sqlite:////app/runs/adk_sessions.db}
+      - /app/adk_apps
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./runs:/app/runs
+    depends_on:
+      - backend
 
   dashboard:
     build:

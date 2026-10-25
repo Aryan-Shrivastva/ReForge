@@ -274,6 +274,65 @@ Docker was not available where these changes were made. Everything below the Doc
 
 To run the unit suite: `python -m pip install -e ".[dev]"`, then `python -m pytest`. Expect 172 tests passing. The real-CrewAI and real-ADK tests run whenever those packages are installed.
 
+## Update 26 October 2026: first Docker test round
+
+### Every run failed at baseline: fixed
+
+**Symptom.** Every run failed at the baseline step within about 7 seconds, with 0 tests passed and 0 failed. The install log said `npm ci` could not find a `package-lock.json`.
+
+**Root cause.**
+
+- The backend runs inside a container, so it starts sandbox containers through the host's Docker daemon.
+- Without `REFORGE_DOCKER_HOST_RUNS_ROOT`, it passed its container-internal path `/app/runs/<id>/workspace` as the bind source.
+- That path doesn't exist on the host, so Docker silently created an empty folder there. The sandbox therefore got an empty `/work`.
+- Confirmed on the Linux host: root-owned phantom folders appeared at `/app/runs/<id>`.
+
+**Fix** (`tools/sandbox.py`):
+
+- **Automatic host-path detection.** The backend reads its own container's mounts through the Docker API and translates `/app/runs/...` to the real host path, so the variable is no longer needed.
+- **Mount verification.** Each sandbox command first checks a one-time token written into `.git/`. If `/work` is the wrong directory, the run fails with a clear "workspace mount" error instead of a misleading npm or pip failure.
+
+**Visibility.** The dashboard now shows the install log, and an explicit message when a repository has no runnable tests.
+
+**Clean-up on hosts that ran the old build:** `sudo rm -rf /app/runs`, plus `sudo rmdir /app` if it is now empty. Both were created by Docker, not by you.
+
+### Dashboard redesign
+
+- **Look:** neutral, light-only styling with no gradients or glows.
+- **Run list:** runs are named by repository, with search and status filters.
+- **Starting runs:** a "New run" dialog.
+- **Run page:** a stage timeline shows where a run failed, and a banner gives the reason.
+- **Changes and report:** the diff and report load automatically; the diff is colored.
+- **Navigation:** Benchmarks is its own page, and URLs are shareable (`#/runs/<id>/tests`).
+- **Code:** split into `components/`, `views/` and `lib/`.
+
+`.gitignore` no longer hides `dashboard/src/lib/`; its Python `lib/` rule had matched that folder.
+
+### Google ADK web UI
+
+`docker compose up` now also starts **adk-web** on port 8001. It runs ADK's developer UI against the same session database the backend writes. Open http://127.0.0.1:8001/dev-ui/?app=reforge and pick a session, whose ID is the run ID. You can also use **Open in ADK web UI** in a run's Agents panel. The tabs show:
+
+- **Events:** every agent result and orchestrator stage update, each carrying its `state_delta`;
+- **State:** the session state.
+
+The `reforge` app (`adk_apps/reforge/agent.py`) is a read-only run inspector. If you chat with it, it answers from the session state and calls your configured model. ReForge's ADK user ID is now `user`, matching the dev UI's default.
+
+### Where data is stored
+
+Everything lives under `./runs` on the host, mounted at `/app/runs` in the containers. There is no database server.
+
+| Path | Contents |
+|---|---|
+| `runs/<run-id>/state.json` | The full run record: stage, analysis, plan, test reports, repairs, metrics, trace, agent runtime, and a mirror of the ADK session state |
+| `runs/<run-id>/workspace/` | The repository as a Git repo. ReForge's changes are commits on branch `reforge/<run-id>` |
+| `runs/<run-id>/report.md`, `report.json` | Final reports |
+| `runs/<run-id>/upload.zip` | The original upload, for ZIP runs |
+| `runs/<run-id>/cancel.requested` | Cancellation marker |
+| `runs/adk_sessions.db` | SQLite store of Google ADK sessions: events and state per run |
+| `runs/evaluation/` | Benchmark-suite runs and summary JSON |
+
+CrewAI keeps only throwaway runtime files, in `.reforge-crewai/` inside the backend container. To start fresh, stop the stack and delete `./runs`.
+
 ## Known limitations
 
 - JavaScript deprecation rules are line-based regexes, not an AST. They skip comment lines but can still match inside strings or multi-line comments.

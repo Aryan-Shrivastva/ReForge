@@ -20,6 +20,7 @@ export interface Failure {
 export interface TestReport {
   phase: "baseline" | "post_transform" | "post_repair";
   install_ok: boolean;
+  install_log_tail: string;
   passed: string[];
   failed: Failure[];
   errored: Failure[];
@@ -34,6 +35,7 @@ export interface ProjectState {
   run_id: string;
   repo_source: string;
   objective: string;
+  objective_origin?: "user" | "discovery" | "inferred";
   workspace_path: string;
   work_branch: string;
   base_commit: string;
