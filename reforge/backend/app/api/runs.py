@@ -217,10 +217,14 @@ class RunService:
             state = self.store.load(run_id)
         except FileNotFoundError as exc:
             raise KeyError(run_id) from exc
+        # Repeat the original request: a discovery run's objective was inferred
+        # by the agent, so the rerun starts discovery again rather than pinning
+        # the previous inference as if a person had typed it.
+        objective = DEFAULT_DISCOVERY_OBJECTIVE if state.objective_origin in {"discovery", "inferred"} else state.objective
         archive = self.runs_root / run_id / "upload.zip"
         if archive.is_file():
             return self.start_upload(
-                objective=state.objective,
+                objective=objective,
                 filename=f"{state.project_name or 'project'}.zip",
                 content=archive.read_bytes(),
                 config_overrides=state.config_overrides,
@@ -228,12 +232,12 @@ class RunService:
         source = state.repo_source
         if _REPOSITORY_URL.match(source):
             request = RunCreateRequest(
-                objective=state.objective, repo_url=source, project_name=state.project_name,
+                objective=objective, repo_url=source, project_name=state.project_name,
                 config_overrides=state.config_overrides,
             )
         elif Path(source).is_dir():
             request = RunCreateRequest(
-                objective=state.objective, workspace_path=source, project_name=state.project_name,
+                objective=objective, workspace_path=source, project_name=state.project_name,
                 config_overrides=state.config_overrides,
             )
         else:
@@ -422,51 +426,6 @@ class RunService:
             shutil.rmtree(destination, ignore_errors=True)
             raise
 
-
-def _source_project_name(source: str) -> str:
-    cleaned = source.split("?", 1)[0].rstrip("/\\")
-    name = cleaned.replace("\\", "/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-    return name.removesuffix(".git") or "Project"
-
-
-def _project_key(request: RunCreateRequest) -> str:
-    if request.repo_url:
-        source = request.repo_url.strip().rstrip("/").removesuffix(".git").casefold()
-        path = source.split("://", 1)[-1]
-        if "://" not in source and "@" in path:
-            path = path.split(":", 1)[-1]
-        parts = [part for part in path.split("/") if part]
-        return "/".join(parts[-2:]) if len(parts) >= 2 else source
-    if request.workspace_path:
-        return str(Path(request.workspace_path).expanduser().resolve()).casefold()
-    return (request.project_name or "uploaded-project").strip().casefold()
-
-
-def _workspace_project_identity(
-    workspace: Path, request: RunCreateRequest, repo_source: str
-) -> tuple[str, str]:
-    """Choose a stable project label/key, using manifest metadata for ZIP uploads."""
-    if request.repo_url or request.workspace_path:
-        return request.project_name or _source_project_name(repo_source), _project_key(request)
-
-    manifest_name: str | None = None
-    package_json = workspace / "package.json"
-    if package_json.is_file():
-        try:
-            value = json.loads(package_json.read_text(encoding="utf-8")).get("name")
-            manifest_name = value if isinstance(value, str) and value.strip() else None
-        except (OSError, ValueError):
-            pass
-    pyproject = workspace / "pyproject.toml"
-    if manifest_name is None and pyproject.is_file():
-        try:
-            value = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("name")
-            manifest_name = value if isinstance(value, str) and value.strip() else None
-        except (OSError, ValueError, tomllib.TOMLDecodeError):
-            pass
-    name = manifest_name or request.project_name or "Uploaded project"
-    return name, manifest_name.casefold() if manifest_name else _project_key(request)
-
     @staticmethod
     def _common_root(names: list[tuple[zipfile.ZipInfo, PurePosixPath]]) -> tuple[str, ...]:
         """Return a single shared top-level directory, if every entry lives under it."""
@@ -524,6 +483,51 @@ async def _read_upload(upload: Any, limit: int) -> bytes:
             raise UploadTooLarge(f"upload exceeds {limit} bytes")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _source_project_name(source: str) -> str:
+    cleaned = source.split("?", 1)[0].rstrip("/\\")
+    name = cleaned.replace("\\", "/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return name.removesuffix(".git") or "Project"
+
+
+def _project_key(request: RunCreateRequest) -> str:
+    if request.repo_url:
+        source = request.repo_url.strip().rstrip("/").removesuffix(".git").casefold()
+        path = source.split("://", 1)[-1]
+        if "://" not in source and "@" in path:
+            path = path.split(":", 1)[-1]
+        parts = [part for part in path.split("/") if part]
+        return "/".join(parts[-2:]) if len(parts) >= 2 else source
+    if request.workspace_path:
+        return str(Path(request.workspace_path).expanduser().resolve()).casefold()
+    return (request.project_name or "uploaded-project").strip().casefold()
+
+
+def _workspace_project_identity(
+    workspace: Path, request: RunCreateRequest, repo_source: str
+) -> tuple[str, str]:
+    """Choose a stable project label/key, using manifest metadata for ZIP uploads."""
+    if request.repo_url or request.workspace_path:
+        return request.project_name or _source_project_name(repo_source), _project_key(request)
+
+    manifest_name: str | None = None
+    package_json = workspace / "package.json"
+    if package_json.is_file():
+        try:
+            value = json.loads(package_json.read_text(encoding="utf-8")).get("name")
+            manifest_name = value if isinstance(value, str) and value.strip() else None
+        except (OSError, ValueError):
+            pass
+    pyproject = workspace / "pyproject.toml"
+    if manifest_name is None and pyproject.is_file():
+        try:
+            value = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("name")
+            manifest_name = value if isinstance(value, str) and value.strip() else None
+        except (OSError, ValueError, tomllib.TOMLDecodeError):
+            pass
+    name = manifest_name or request.project_name or "Uploaded project"
+    return name, manifest_name.casefold() if manifest_name else _project_key(request)
 
 
 def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | None = None) -> APIRouter:

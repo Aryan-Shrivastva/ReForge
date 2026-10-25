@@ -94,7 +94,8 @@ def test_generated_tests_run_on_node_test_runner_when_the_project_has_no_framewo
 
     node_runs = [command for command in sandbox.commands if "node --test" in command]
     assert len(node_runs) == 1
-    assert "--test-reporter-destination=.reforge-artifacts/node-tests/0.xml tests/reforge_generated/format.test.js" in node_runs[0]
+    assert "--test-reporter=junit --test-reporter-destination=.reforge-artifacts/node-tests/0.xml" in node_runs[0]
+    assert node_runs[0].endswith("tests/reforge_generated/format.test.js; true")
     assert "tests/reforge_generated/format.test.js::add adds numbers" in report.passed
     assert not any("npm run test" in command for command in sandbox.commands)  # placeholder script is not run
 
