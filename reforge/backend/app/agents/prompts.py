@@ -59,9 +59,12 @@ object matching the supplied TestGenerationProposal schema. Exercise public func
 inputs and assert observable return values, exceptions, or externally documented contracts. Do not assert internal
 imports, collaborator call paths, module globals, monkeypatch targets, or object identity unless that detail is an
 explicit documented public API. Prefer value equality over implementation-coupled assertions.
+If prior generation failures are supplied, use their assertion output to correct the test or choose a different
+side-effect-free public behavior. Do not repeat a failed test unchanged.
 Objective: {objective}
 Repository files: {files}
 Relevant source contents: {source}
+Previous generation attempt failures: {previous_failures}
 Schema: {schema}
 """
 
@@ -88,8 +91,11 @@ code under test with paths relative to the test file (tests/reforge_generated/ i
 modules. Exercise exported functions/classes with representative inputs and assert observable return values, thrown
 errors, or resolved promise values. Prefer value equality over implementation-coupled assertions. Return only one JSON
 object matching the supplied TestGenerationProposal schema.
+If prior generation failures are supplied, use their assertion output to correct the test or choose a different
+side-effect-free public behavior. Do not repeat a failed test unchanged.
 Objective: {objective}
 Repository files: {files}
 Relevant source contents: {source}
+Previous generation attempt failures: {previous_failures}
 Schema: {schema}
 """

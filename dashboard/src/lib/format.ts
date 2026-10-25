@@ -6,7 +6,7 @@ export type RunStatus = FinalStatus | "RUNNING" | "QUEUED";
 export function repoName(state: ProjectState): string {
   const source = state.repo_source.trim();
   if (!source) return "Untitled run";
-  if (/[\\/]upload\.zip$/.test(source)) return "Uploaded archive";
+  if (/[\\/]upload\.zip$/.test(source)) return state.project_name || "Uploaded archive";
   const cleaned = source.replace(/\.git$/, "").replace(/[\\/]+$/, "");
   const match = cleaned.match(/[:/]([^/:]+)\/([^/]+)$/);
   if (match) return `${match[1]}/${match[2]}`;

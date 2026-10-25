@@ -36,6 +36,10 @@ export const api = {
     }),
   cancelRun: (runId: string) =>
     request<ProjectState>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+  deleteRun: (runId: string) =>
+    request<{ deleted: boolean }>(`/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
+  rerun: (runId: string) =>
+    request<{ run_id: string }>(`/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),
   createRun: async (input: { objective?: string; repoUrl?: string; upload?: File }) => {
     if (input.upload) {
       const body = new FormData();

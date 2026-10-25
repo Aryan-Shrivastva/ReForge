@@ -5,6 +5,14 @@ import { Status } from "../components/ui";
 
 type Filter = "all" | "active" | "ready" | "attention";
 
+function projectKey(run: ProjectState): string {
+  if (run.project_key) return run.project_key;
+  const source = run.repo_source.trim().replace(/\.git$/, "").replace(/[\\/]+$/, "");
+  if (/[\\/]upload\.zip$/i.test(source)) return `legacy-upload:${run.run_id}`;
+  const repository = source.match(/(?:^|[:/])([^/:]+\/[^/:]+)$/);
+  return repository ? repository[1].toLowerCase() : source.toLowerCase() || repoName(run).toLowerCase();
+}
+
 const FILTERS: Array<[Filter, string]> = [
   ["all", "All"],
   ["active", "Running"],
@@ -19,12 +27,27 @@ function matches(filter: Filter, status: RunStatus): boolean {
   return true;
 }
 
-export function RunsList({ runs, loading, onOpen, onNew }: { runs: ProjectState[]; loading: boolean; onOpen: (runId: string) => void; onNew: () => void }) {
+export function RunsList({ runs, loading, onOpen, onNew, onDelete, onRerun }: {
+  runs: ProjectState[];
+  loading: boolean;
+  onOpen: (runId: string) => void;
+  onNew: () => void;
+  onDelete: (run: ProjectState) => void;
+  onRerun: (run: ProjectState) => void;
+}) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const visible = useMemo(() => {
+  const groups = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return runs.filter((run) => matches(filter, runStatus(run)) && (!needle || [repoName(run), run.objective, run.run_id].some((value) => value.toLowerCase().includes(needle))));
+    const grouped = new Map<string, ProjectState[]>();
+    for (const run of runs) {
+      const key = projectKey(run);
+      grouped.set(key, [...(grouped.get(key) ?? []), run]);
+    }
+    return [...grouped.entries()]
+      .map(([key, items]) => ({ key, runs: items, latest: items[0]! }))
+      .filter(({ runs: items }) => items.some((run) => matches(filter, runStatus(run)) && (!needle || [repoName(run), run.project_name ?? "", run.objective, run.run_id].some((value) => value.toLowerCase().includes(needle)))))
+      .sort((a, b) => (updatedAt(b.latest)?.getTime() ?? 0) - (updatedAt(a.latest)?.getTime() ?? 0));
   }, [runs, query, filter]);
 
   return (
@@ -54,18 +77,36 @@ export function RunsList({ runs, loading, onOpen, onNew }: { runs: ProjectState[
           </div>
           <div className="list">
             {loading && !runs.length && <p className="list-empty">Loading runs…</p>}
-            {!loading && !visible.length && <p className="list-empty">No runs match these filters.</p>}
-            {visible.map((run) => (
-              <button key={run.run_id} type="button" className="list-row" onClick={() => onOpen(run.run_id)}>
-                <span className="list-main">
-                  <span className="list-title">{repoName(run)}</span>
-                  <span className="list-sub">{run.objective}</span>
-                </span>
-                <span className="list-status"><Status status={runStatus(run)} /></span>
-                <span className="list-meta mono">{run.run_id.slice(0, 7)}</span>
-                <span className="list-meta">{duration(runDuration(run))}</span>
-                <span className="list-meta list-time">{relativeTime(updatedAt(run))}</span>
-              </button>
+            {!loading && !groups.length && <p className="list-empty">No runs match these filters.</p>}
+            {groups.map(({ key, runs: items, latest }) => (
+              <details key={key} className="project-group">
+                <summary className="project-summary">
+                  <span className="project-heading">
+                    <span className="list-title">{repoName(latest)}</span>
+                    <span className="list-sub">{items.length} {items.length === 1 ? "run" : "runs"} · latest {relativeTime(updatedAt(latest))}</span>
+                  </span>
+                  <span className="list-status"><Status status={runStatus(latest)} /></span>
+                  <span className="project-latest-objective">{latest.objective}</span>
+                  <span className="project-chevron" aria-hidden="true">⌄</span>
+                </summary>
+                <div className="project-history">
+                  {items.map((run) => (
+                    <div className="project-run" key={run.run_id}>
+                      <button type="button" className="project-run-open" onClick={() => onOpen(run.run_id)}>
+                        <span className="list-status"><Status status={runStatus(run)} /></span>
+                        <span className="project-run-id mono">{run.run_id.slice(0, 7)}</span>
+                        <span className="project-run-objective">{run.objective}</span>
+                        <span className="list-meta">{duration(runDuration(run))}</span>
+                        <span className="list-meta list-time">{relativeTime(updatedAt(run))}</span>
+                      </button>
+                      <div className="project-run-actions">
+                        <button type="button" className="btn btn-sm" onClick={() => onRerun(run)}>Rerun</button>
+                        {run.final_status && <button type="button" className="btn btn-sm btn-danger" onClick={() => onDelete(run)}>Delete</button>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
             ))}
           </div>
         </>

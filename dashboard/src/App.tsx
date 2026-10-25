@@ -156,6 +156,32 @@ export default function App() {
     }
   };
 
+  const rerun = async (run: ProjectState) => {
+    try {
+      const created = await api.rerun(run.run_id);
+      await refreshRuns();
+      navigate({ page: "run", runId: created.run_id, tab: "overview" });
+      await loadRun(created.run_id);
+    } catch (caught) {
+      setError(`Could not rerun this project. ${message(caught)}`);
+    }
+  };
+
+  const deleteRun = async (run: ProjectState) => {
+    if (!run.final_status) return;
+    if (!window.confirm(`Delete run ${run.run_id.slice(0, 7)} for ${repoName(run)}? Its report and run files will be permanently removed.`)) return;
+    try {
+      await api.deleteRun(run.run_id);
+      setRuns((items) => items.filter((item) => item.run_id !== run.run_id));
+      if (selected?.run_id === run.run_id) {
+        setSelected(null);
+        navigate({ page: "runs" });
+      }
+    } catch (caught) {
+      setError(`Could not delete this run. ${message(caught)}`);
+    }
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -192,11 +218,25 @@ export default function App() {
       <main className="main">
         {route.page === "benchmarks" && <Benchmarks onError={setError} />}
         {route.page === "runs" && (
-          <RunsList runs={runs} loading={loading} onOpen={(runId) => navigate({ page: "run", runId, tab: "overview" })} onNew={() => setDialogOpen(true)} />
+          <RunsList
+            runs={runs}
+            loading={loading}
+            onOpen={(runId) => navigate({ page: "run", runId, tab: "overview" })}
+            onNew={() => setDialogOpen(true)}
+            onDelete={(run) => void deleteRun(run)}
+            onRerun={(run) => void rerun(run)}
+          />
         )}
         {route.page === "run" && (
           selected
-            ? <RunPage state={selected} tab={route.tab} onTab={(tab) => navigate({ page: "run", runId: route.runId, tab })} onCancel={() => void cancelRun()} />
+            ? <RunPage
+                state={selected}
+                tab={route.tab}
+                onTab={(tab) => navigate({ page: "run", runId: route.runId, tab })}
+                onCancel={() => void cancelRun()}
+                onDelete={() => void deleteRun(selected)}
+                onRerun={() => void rerun(selected)}
+              />
             : <div className="container"><p className="muted">Loading run…</p></div>
         )}
       </main>

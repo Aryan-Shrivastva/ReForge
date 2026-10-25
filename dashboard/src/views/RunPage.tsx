@@ -16,7 +16,14 @@ export const RUN_TABS = [
 ] as const;
 export type RunTab = (typeof RUN_TABS)[number][0];
 
-export function RunPage({ state, tab, onTab, onCancel }: { state: ProjectState; tab: RunTab; onTab: (tab: RunTab) => void; onCancel: () => void }) {
+export function RunPage({ state, tab, onTab, onCancel, onDelete, onRerun }: {
+  state: ProjectState;
+  tab: RunTab;
+  onTab: (tab: RunTab) => void;
+  onCancel: () => void;
+  onDelete: () => void;
+  onRerun: () => void;
+}) {
   const status = runStatus(state);
   return (
     <div className="container">
@@ -27,6 +34,8 @@ export function RunPage({ state, tab, onTab, onCancel }: { state: ProjectState; 
         </div>
         <div className="run-head-actions">
           {!state.final_status && <button type="button" className="btn btn-danger" onClick={onCancel}>Cancel</button>}
+          <button type="button" className="btn" onClick={onRerun}>Rerun</button>
+          {state.final_status && <button type="button" className="btn btn-danger" onClick={onDelete}>Delete</button>}
           {state.report_path && <a className="btn" href={api.reportUrl(state.run_id, "markdown")} download={`reforge-${state.run_id.slice(0, 8)}.md`}>Download report</a>}
         </div>
       </header>

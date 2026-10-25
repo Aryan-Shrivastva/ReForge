@@ -476,7 +476,8 @@ class TestRunner:
         if not files:
             return TestReport(phase=phase, install_ok=True, install_log_tail=install_log_tail, duration_s=monotonic() - started)
         commands = [
-            f"node --test --test-reporter=junit --test-reporter-destination={_NODE_ARTIFACT_DIR}/{index}.xml {shlex.quote(file)}"
+            f"node --test --test-reporter=junit --test-reporter-destination={_NODE_ARTIFACT_DIR}/{index}.xml "
+            f"--test-reporter=spec --test-reporter-destination=stdout {shlex.quote(file)}"
             for index, file in enumerate(files)
         ]
         run = self.sandbox.run(
@@ -488,6 +489,7 @@ class TestRunner:
         failed: list[Failure] = []
         errored: list[Failure] = []
         skipped: list[str] = []
+        runner_output = self._tail(run)
         for index, file in enumerate(files):
             artifact = directory / f"{index}.xml"
             try:
@@ -496,7 +498,16 @@ class TestRunner:
                 errored.append(self._js_failure(f"{file}::<load>", "test file produced no results", self._tail(run), file))
                 continue
             passed.extend(parsed.passed)
+            for failure in parsed.failed:
+                failure.traceback_excerpt = self._with_runner_diagnostics(
+                    failure.traceback_excerpt, runner_output
+                )
+            for failure in parsed.errored:
+                failure.traceback_excerpt = self._with_runner_diagnostics(
+                    failure.traceback_excerpt, runner_output
+                )
             failed.extend(parsed.failed)
+            errored.extend(parsed.errored)
             skipped.extend(parsed.skipped)
         if run.timed_out:
             errored.append(self._runner_failure("<node-tests>", "node --test run timed out", run))
@@ -510,6 +521,14 @@ class TestRunner:
             skipped=skipped,
             duration_s=monotonic() - started,
         )
+
+    @staticmethod
+    def _with_runner_diagnostics(existing: str, runner_output: str) -> str:
+        """Retain Node's assertion output when its JUnit reporter is terse."""
+        if not runner_output.strip():
+            return existing
+        detail = f"{existing.rstrip()}\n\nNode test runner output:\n{runner_output}".strip()
+        return detail[-4_000:]
 
     @classmethod
     def parse_node_junit(cls, xml_text: str, file: str) -> TestReport:

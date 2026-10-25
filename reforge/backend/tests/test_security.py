@@ -56,6 +56,27 @@ def test_git_tools_never_run_repository_hooks_or_fsmonitor(tmp_path: Path) -> No
     assert not marker.exists()
 
 
+def test_git_tools_commits_without_machine_git_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    initialize_repository(workspace, "baseline")
+    # Match a URL clone, which has no local author identity configured.
+    plain_git(workspace, "config", "--unset", "user.name")
+    plain_git(workspace, "config", "--unset", "user.email")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "missing-global-config"))
+    monkeypatch.delenv("GIT_AUTHOR_NAME", raising=False)
+    monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_NAME", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_EMAIL", raising=False)
+
+    (workspace / "app.js").write_text("module.exports = 2;\n", encoding="utf-8")
+    GitTools(workspace).commit("change", ["app.js"])
+
+    author = run_git(["show", "-s", "--format=%an <%ae>"], cwd=workspace)
+    assert author.stdout.strip() == "ReForge <reforge@local.invalid>"
+
+
 def test_initialize_repository_refuses_existing_git_metadata(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
 

@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import threading
+import tomllib
 import uuid
 import zipfile
 from collections.abc import Callable
@@ -52,6 +53,7 @@ class RunCreateRequest(BaseModel):
     repo_url: str | None = None
     workspace_path: str | None = None
     archive_path: str | None = None
+    project_name: str | None = None
     config_overrides: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -160,6 +162,7 @@ class RunService:
             RunCreateRequest(
                 objective=objective or DEFAULT_DISCOVERY_OBJECTIVE,
                 archive_path=str(archive),
+                project_name=Path(filename).stem,
                 config_overrides=config_overrides,
             ),
         )
@@ -169,7 +172,10 @@ class RunService:
         state = ProjectState(
             run_id=run_id,
             repo_source=request.repo_url or request.workspace_path or request.archive_path or "",
+            project_name=request.project_name or _source_project_name(request.repo_url or request.workspace_path or ""),
+            project_key=_project_key(request),
             objective=request.objective,
+            config_overrides=request.config_overrides,
             workspace_path=str(workspace),
             work_branch=f"reforge/{run_id}",
             base_commit="",
@@ -187,6 +193,52 @@ class RunService:
             self._threads[run_id] = thread
         thread.start()
         return run_id
+
+    def delete(self, run_id: str) -> None:
+        """Delete a completed run and all its artifacts; active workers are never removed."""
+        try:
+            state = self.store.load(run_id)
+        except FileNotFoundError as exc:
+            raise KeyError(run_id) from exc
+        run_dir = self.runs_root / run_id
+        if run_dir.is_symlink() or run_dir.resolve().parent != self.runs_root:
+            raise ValueError("run directory is outside the configured runs root")
+        with self._lock:
+            thread = self._threads.get(run_id)
+            if thread is not None and thread.is_alive() or state.final_status is None:
+                raise RuntimeError("cannot delete a running run")
+            shutil.rmtree(run_dir)
+            self._threads.pop(run_id, None)
+            self._cancellations.pop(run_id, None)
+
+    def rerun(self, run_id: str) -> str:
+        """Start a fresh run with the original project's source and objective."""
+        try:
+            state = self.store.load(run_id)
+        except FileNotFoundError as exc:
+            raise KeyError(run_id) from exc
+        archive = self.runs_root / run_id / "upload.zip"
+        if archive.is_file():
+            return self.start_upload(
+                objective=state.objective,
+                filename=f"{state.project_name or 'project'}.zip",
+                content=archive.read_bytes(),
+                config_overrides=state.config_overrides,
+            )
+        source = state.repo_source
+        if _REPOSITORY_URL.match(source):
+            request = RunCreateRequest(
+                objective=state.objective, repo_url=source, project_name=state.project_name,
+                config_overrides=state.config_overrides,
+            )
+        elif Path(source).is_dir():
+            request = RunCreateRequest(
+                objective=state.objective, workspace_path=source, project_name=state.project_name,
+                config_overrides=state.config_overrides,
+            )
+        else:
+            raise ValueError("original source is unavailable, so this run cannot be rerun")
+        return self.start(request)
 
     def cancel(self, run_id: str) -> ProjectState:
         try:
@@ -255,6 +307,11 @@ class RunService:
                 objective=request.objective,
                 workspace=workspace,
             )
+            state.project_name, state.project_key = _workspace_project_identity(
+                workspace, request, state.repo_source
+            )
+            state.config_overrides = request.config_overrides
+            self.store.save(state)
             runner.run(state)
         except Exception as exc:
             self._save_startup_failure(run_id, request, workspace, exc)
@@ -364,6 +421,51 @@ class RunService:
         except ArchiveError:
             shutil.rmtree(destination, ignore_errors=True)
             raise
+
+
+def _source_project_name(source: str) -> str:
+    cleaned = source.split("?", 1)[0].rstrip("/\\")
+    name = cleaned.replace("\\", "/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return name.removesuffix(".git") or "Project"
+
+
+def _project_key(request: RunCreateRequest) -> str:
+    if request.repo_url:
+        source = request.repo_url.strip().rstrip("/").removesuffix(".git").casefold()
+        path = source.split("://", 1)[-1]
+        if "://" not in source and "@" in path:
+            path = path.split(":", 1)[-1]
+        parts = [part for part in path.split("/") if part]
+        return "/".join(parts[-2:]) if len(parts) >= 2 else source
+    if request.workspace_path:
+        return str(Path(request.workspace_path).expanduser().resolve()).casefold()
+    return (request.project_name or "uploaded-project").strip().casefold()
+
+
+def _workspace_project_identity(
+    workspace: Path, request: RunCreateRequest, repo_source: str
+) -> tuple[str, str]:
+    """Choose a stable project label/key, using manifest metadata for ZIP uploads."""
+    if request.repo_url or request.workspace_path:
+        return request.project_name or _source_project_name(repo_source), _project_key(request)
+
+    manifest_name: str | None = None
+    package_json = workspace / "package.json"
+    if package_json.is_file():
+        try:
+            value = json.loads(package_json.read_text(encoding="utf-8")).get("name")
+            manifest_name = value if isinstance(value, str) and value.strip() else None
+        except (OSError, ValueError):
+            pass
+    pyproject = workspace / "pyproject.toml"
+    if manifest_name is None and pyproject.is_file():
+        try:
+            value = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("name")
+            manifest_name = value if isinstance(value, str) and value.strip() else None
+        except (OSError, ValueError, tomllib.TOMLDecodeError):
+            pass
+    name = manifest_name or request.project_name or "Uploaded project"
+    return name, manifest_name.casefold() if manifest_name else _project_key(request)
 
     @staticmethod
     def _common_root(names: list[tuple[zipfile.ZipInfo, PurePosixPath]]) -> tuple[str, ...]:
@@ -477,6 +579,27 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
             return service.cancel(run_id)
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
+
+    @router.delete("/runs/{run_id}")
+    def delete_run(run_id: str) -> dict[str, bool]:
+        try:
+            service.delete(run_id)
+            return {"deleted": True}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/runs/{run_id}/rerun", response_model=RunCreated, status_code=status.HTTP_202_ACCEPTED)
+    def rerun(run_id: str) -> RunCreated:
+        try:
+            return RunCreated(run_id=service.rerun(run_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.get("/runs/{run_id}/analysis")
     def get_analysis(run_id: str):

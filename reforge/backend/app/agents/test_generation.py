@@ -64,9 +64,16 @@ class CharacterizationTestGenerator(StructuredAgent):
         if llm is not None:
             super().__init__(llm, max_retries=max_retries)
 
-    def propose(self, objective: str, workspace: Path) -> TestGenerationProposal:
+    def propose(
+        self,
+        objective: str,
+        workspace: Path,
+        *,
+        previous_failures: list[dict[str, str]] | None = None,
+    ) -> TestGenerationProposal:
         repository = self.repository_factory(workspace)
         files = [path for path in repository.list_tree() if not is_skipped(path)]
+        failure_context = json.dumps(previous_failures or [], ensure_ascii=False)
         language = self._language(workspace) or "python"
         framework = self._generation_framework(workspace) if language == "javascript" else None
         extension = ".py" if language == "python" else self._js_extension(workspace, framework)
@@ -75,6 +82,7 @@ class CharacterizationTestGenerator(StructuredAgent):
                 objective=objective,
                 files=json.dumps(files),
                 source=json.dumps(self._source(repository, files, (".py",))),
+                previous_failures=failure_context,
                 schema=json.dumps(TestGenerationProposal.model_json_schema()),
             )
         else:
@@ -87,6 +95,7 @@ class CharacterizationTestGenerator(StructuredAgent):
                 extension=extension,
                 files=json.dumps(files),
                 source=json.dumps(self._source(repository, files, JS_LIKE_EXTENSIONS)),
+                previous_failures=failure_context,
                 schema=json.dumps(TestGenerationProposal.model_json_schema()),
             )
         if self.executor is not None:

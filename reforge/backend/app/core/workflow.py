@@ -417,11 +417,14 @@ class WorkflowRunner:
             or not state.analysis.tests.has_tests
             or len(report.passed) < self.min_baseline_passing_tests
         ) and self.test_generator is not None and self.test_generator.supports(workspace):
+            previous_failures: list[dict[str, str]] = []
             for attempt in range(2):
                 proposal = self._agent_call(
                     state,
                     "test_generation",
-                    lambda: self.test_generator.propose(state.objective, workspace),
+                    lambda: self.test_generator.propose(
+                        state.objective, workspace, previous_failures=previous_failures
+                    ),
                 )
                 paths = self.test_generator.write(workspace, proposal)
                 candidate = self._run_tests(state, workspace, "baseline")
@@ -440,11 +443,21 @@ class WorkflowRunner:
                         {"files": paths, "passing_tests": generated_passes, "attempt": attempt + 1},
                     )
                     break
+                previous_failures = [
+                    {
+                        "test_id": failure.test_id,
+                        "file": failure.file or "",
+                        "error_type": failure.error_type,
+                        "message": failure.message,
+                        "traceback_excerpt": failure.traceback_excerpt[-1_500:],
+                    }
+                    for failure in generated_failures
+                ]
                 for path in paths:
                     RepositoryTools(workspace).resolve(path).unlink(missing_ok=True)
                 self._record(
                     state, "testing", "decision", "Dropped generated tests that failed on original code.",
-                    {"files": paths, "attempt": attempt + 1},
+                    {"files": paths, "attempt": attempt + 1, "failures": previous_failures},
                 )
 
         if report.install_ok and not report.passed:

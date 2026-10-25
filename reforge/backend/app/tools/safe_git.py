@@ -18,6 +18,10 @@ SAFE_GIT_CONFIG: tuple[str, ...] = (
     "-c", f"core.hooksPath={os.devnull}",
     "-c", "core.fsmonitor=false",
     "-c", "core.untrackedCache=false",
+    # ReForge creates commits in its own isolated workspaces. Do not depend on
+    # user/global Git configuration, which is commonly absent in containers.
+    "-c", "user.name=ReForge",
+    "-c", "user.email=reforge@local.invalid",
     "-c", "protocol.ext.allow=never",
     "-c", "submodule.recurse=false",
 )

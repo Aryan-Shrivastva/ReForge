@@ -212,8 +212,11 @@ class TraceEvent(StrictModel):
 class ProjectState(StrictModel):
     run_id: str
     repo_source: str
+    project_key: str = ""
+    project_name: str = ""
     objective: str
     objective_origin: Literal["user", "discovery", "inferred"] = "user"
+    config_overrides: dict[str, Any] = Field(default_factory=dict)
     workspace_path: str
     work_branch: str
     base_commit: str

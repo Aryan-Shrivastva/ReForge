@@ -34,6 +34,8 @@ export interface TestReport {
 export interface ProjectState {
   run_id: string;
   repo_source: string;
+  project_key?: string;
+  project_name?: string;
   objective: string;
   objective_origin?: "user" | "discovery" | "inferred";
   workspace_path: string;
