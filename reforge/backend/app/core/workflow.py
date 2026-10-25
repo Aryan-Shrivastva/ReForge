@@ -447,11 +447,34 @@ class WorkflowRunner:
                     {"files": paths, "attempt": attempt + 1},
                 )
 
+        if report.install_ok and not report.passed:
+            # No runnable tests and no characterization test survived: fall
+            # back to syntax checks so the run can still guard its changes,
+            # and say plainly that behavior is not verified.
+            smoke = self._run_tests(state, workspace, "baseline", smoke=True)
+            state.test_runs.append(smoke)
+            if smoke.install_ok and smoke.passed:
+                state.smoke_baseline = True
+                report = smoke
+                self._record(
+                    state, "testing", "decision",
+                    f"No runnable tests found; using {len(smoke.passed)} syntax checks as a reduced baseline. "
+                    "Changes will be verified to install and parse, not to preserve behavior.",
+                    {"smoke_checks": len(smoke.passed)},
+                )
+
         state.baseline = report
         state.baseline_pass_set = list(report.passed)
         state.protected_test_files = self._protected_test_files(state, workspace)
-        if not report.install_ok or not state.baseline_pass_set:
-            self._report_failure(state, "No usable baseline: install failed or no tests passed.")
+        if not report.install_ok:
+            self._report_failure(state, "No usable baseline: the project's dependencies failed to install in the sandbox.")
+            return
+        if not state.baseline_pass_set:
+            self._report_failure(
+                state,
+                "No usable baseline: the project has no runnable tests, no generated characterization test passed, "
+                "and no source file could be syntax-checked.",
+            )
             return
         generated_files = [path for path in state.protected_test_files if path.startswith(GENERATED_TEST_PREFIX)]
         git = self.git_factory(workspace)
@@ -617,15 +640,20 @@ class WorkflowRunner:
             if test_id.split("::", 1)[0].startswith(GENERATED_TEST_PREFIX)
         ]
 
-    def _run_tests(self, state: ProjectState, workspace: Path, phase: str) -> TestReport:
-        self._record(state, "testing", "start", f"{phase} test run started.")
+    def _run_tests(self, state: ProjectState, workspace: Path, phase: str, *, smoke: bool = False) -> TestReport:
+        self._record(state, "testing", "start", f"{phase} {'syntax checks' if smoke else 'test run'} started.")
         runner = self.testing_runner_factory(workspace)
         dependency_changed = bool(
             phase != "baseline"
             and state.plan
             and any(step.status == "applied" and step.kind == "dependency" for step in state.plan.steps)
         )
-        report = runner.run(phase, recreate_venv=dependency_changed)
+        smoke_checks = smoke or state.smoke_baseline
+        report = (
+            runner.run(phase, recreate_venv=dependency_changed, smoke_checks=True)
+            if smoke_checks
+            else runner.run(phase, recreate_venv=dependency_changed)
+        )
         self._record(
             state,
             "testing",

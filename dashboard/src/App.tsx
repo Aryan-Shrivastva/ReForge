@@ -1,48 +1,31 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { ProjectState } from "./types";
-import { duration, label, message, relativeTime, repoName, runDuration, runStatus, startedAt } from "./lib/format";
+import { message, repoName } from "./lib/format";
 import { NewRunDialog, type NewRunInput } from "./components/NewRunDialog";
-import { RunList } from "./components/RunList";
-import { StageTimeline } from "./components/StageTimeline";
-import { StatusPill } from "./components/ui";
-import { Activity } from "./views/Activity";
-import { Analysis } from "./views/Analysis";
 import { Benchmarks } from "./views/Benchmarks";
-import { Changes } from "./views/Changes";
-import { Overview } from "./views/Overview";
-import { Plan } from "./views/Plan";
-import { Report } from "./views/Report";
-import { Tests } from "./views/Tests";
+import { RUN_TABS, RunPage, type RunTab } from "./views/RunPage";
+import { RunsList } from "./views/RunsList";
 
-const TABS = [
-  ["overview", "Overview"],
-  ["analysis", "Analysis"],
-  ["plan", "Plan"],
-  ["changes", "Changes"],
-  ["tests", "Tests"],
-  ["activity", "Activity"],
-  ["report", "Report"],
-] as const;
-type Tab = (typeof TABS)[number][0];
-
-interface Route {
-  page: "runs" | "benchmarks";
-  runId: string | null;
-  tab: Tab;
-}
+type Route =
+  | { page: "runs" }
+  | { page: "run"; runId: string; tab: RunTab }
+  | { page: "benchmarks" };
 
 function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  if (parts[0] === "benchmarks") return { page: "benchmarks", runId: null, tab: "overview" };
-  const tab = TABS.some(([key]) => key === parts[2]) ? (parts[2] as Tab) : "overview";
-  return { page: "runs", runId: parts[0] === "runs" && parts[1] ? parts[1] : null, tab };
+  if (parts[0] === "benchmarks") return { page: "benchmarks" };
+  if (parts[0] === "runs" && parts[1]) {
+    const tab = RUN_TABS.some(([key]) => key === parts[2]) ? (parts[2] as RunTab) : "overview";
+    return { page: "run", runId: parts[1], tab };
+  }
+  return { page: "runs" };
 }
 
-function routeHash(route: Route): string {
+function toHash(route: Route): string {
   if (route.page === "benchmarks") return "#/benchmarks";
-  if (!route.runId) return "#/runs";
-  return `#/runs/${route.runId}${route.tab === "overview" ? "" : `/${route.tab}`}`;
+  if (route.page === "run") return `#/runs/${route.runId}${route.tab === "overview" ? "" : `/${route.tab}`}`;
+  return "#/";
 }
 
 export default function App() {
@@ -54,26 +37,24 @@ export default function App() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [, setClock] = useState(0);
 
-  const navigate = useCallback((next: Partial<Route>) => {
-    setRoute((current) => {
-      const merged = { ...current, ...next };
-      const hash = routeHash(merged);
-      if (window.location.hash !== hash) window.history.pushState(null, "", hash);
-      return merged;
-    });
+  const navigate = useCallback((next: Route) => {
+    const hash = toHash(next);
+    if (window.location.hash !== hash) window.history.pushState(null, "", hash);
+    setRoute(next);
+    window.scrollTo({ top: 0 });
   }, []);
 
   useEffect(() => {
-    const onPop = () => setRoute(parseRoute(window.location.hash));
-    window.addEventListener("popstate", onPop);
-    window.addEventListener("hashchange", onPop);
+    const sync = () => setRoute(parseRoute(window.location.hash));
+    window.addEventListener("popstate", sync);
+    window.addEventListener("hashchange", sync);
     return () => {
-      window.removeEventListener("popstate", onPop);
-      window.removeEventListener("hashchange", onPop);
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener("hashchange", sync);
     };
   }, []);
 
-  // Keep relative timestamps ("3m ago") fresh.
+  // Keep relative times ("3m ago") current.
   useEffect(() => {
     const timer = window.setInterval(() => setClock((value) => value + 1), 30_000);
     return () => window.clearInterval(timer);
@@ -85,7 +66,7 @@ export default function App() {
       setError(null);
       return true;
     } catch (caught) {
-      setError(`Cannot reach the ReForge API: ${message(caught)}`);
+      setError(`Cannot reach the ReForge API. ${message(caught)}`);
       return false;
     } finally {
       setLoading(false);
@@ -109,27 +90,27 @@ export default function App() {
     try {
       const current = await api.getRun(runId);
       setSelected(current);
-      setRuns((items) => {
-        const rest = items.filter((item) => item.run_id !== current.run_id);
-        return items.some((item) => item.run_id === current.run_id)
-          ? items.map((item) => (item.run_id === current.run_id ? current : item))
-          : [current, ...rest];
-      });
+      setRuns((items) => items.some((item) => item.run_id === runId)
+        ? items.map((item) => (item.run_id === runId ? current : item))
+        : [current, ...items]);
     } catch (caught) {
       setError(message(caught));
     }
   }, []);
 
-  // Load the run named in the URL.
+  const routeRunId = route.page === "run" ? route.runId : null;
   useEffect(() => {
-    if (route.page !== "runs" || !route.runId) {
+    if (!routeRunId) {
       setSelected(null);
       return;
     }
-    if (selected?.run_id !== route.runId) void loadRun(route.runId);
-  }, [route.page, route.runId]);
+    if (selected?.run_id !== routeRunId) {
+      setSelected(runs.find((run) => run.run_id === routeRunId) ?? null);
+      void loadRun(routeRunId);
+    }
+  }, [routeRunId]);
 
-  // Stream live updates for an in-progress run.
+  // Live updates while a run is in progress.
   useEffect(() => {
     if (!selected || selected.final_status) return;
     const runId = selected.run_id;
@@ -156,17 +137,17 @@ export default function App() {
     try {
       const created = await api.createRun(input);
       setDialogOpen(false);
-      navigate({ page: "runs", runId: created.run_id, tab: "overview" });
+      navigate({ page: "run", runId: created.run_id, tab: "overview" });
       await loadRun(created.run_id);
       return true;
     } catch (caught) {
-      setError(`Could not start the run: ${message(caught)}`);
+      setError(`Could not start the run. ${message(caught)}`);
       return false;
     }
   };
 
   const cancelRun = async () => {
-    if (!selected || !window.confirm("Cancel this run? It stops at the next checkpoint.")) return;
+    if (!selected || !window.confirm("Cancel this run? It stops at its next checkpoint.")) return;
     try {
       setSelected(await api.cancelRun(selected.run_id));
       void refreshRuns();
@@ -177,116 +158,50 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="appbar">
-        <a className="appbar-brand" href="#/runs" onClick={() => navigate({ page: "runs", runId: null })}>
-          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M4 3h7a5 5 0 0 1 1.6 9.74L16 17h-2.6l-3.1-4H6.5v4H4zm2.5 2.3v5.4H11a2.7 2.7 0 0 0 0-5.4z" fill="currentColor" /></svg>
-          ReForge
-        </a>
-        <nav className="appbar-nav" aria-label="Primary">
-          <a href="#/runs" className={route.page === "runs" ? "active" : ""}>Runs</a>
-          <a href="#/benchmarks" className={route.page === "benchmarks" ? "active" : ""}>Benchmarks</a>
-        </nav>
-        <div className="appbar-actions">
-          <button type="button" className="button button-primary" onClick={() => setDialogOpen(true)}>New run</button>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <nav className="crumbs" aria-label="Breadcrumb">
+            <a href="#/" className="brand" onClick={(event) => { event.preventDefault(); navigate({ page: "runs" }); }}>
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 2 22 20H2z" fill="currentColor" /></svg>
+              ReForge
+            </a>
+            {route.page === "run" && (
+              <>
+                <span className="crumb-sep" aria-hidden="true">/</span>
+                <span className="crumb">{selected ? repoName(selected) : "Run"}</span>
+              </>
+            )}
+          </nav>
+          <nav className="topnav" aria-label="Primary">
+            <a href="#/" className={route.page !== "benchmarks" ? "active" : ""} onClick={(event) => { event.preventDefault(); navigate({ page: "runs" }); }}>Runs</a>
+            <a href="#/benchmarks" className={route.page === "benchmarks" ? "active" : ""} onClick={(event) => { event.preventDefault(); navigate({ page: "benchmarks" }); }}>Benchmarks</a>
+          </nav>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setDialogOpen(true)}>New run</button>
         </div>
       </header>
 
       {error && (
         <div className="banner" role="alert">
-          <span>{error}</span>
-          <button type="button" className="link-button" onClick={() => setError(null)}>Dismiss</button>
+          <div className="banner-inner">
+            <span>{error}</span>
+            <button type="button" className="link" onClick={() => setError(null)}>Dismiss</button>
+          </div>
         </div>
       )}
 
-      {route.page === "benchmarks" ? (
-        <main className="main main-full"><Benchmarks onError={setError} /></main>
-      ) : (
-        <div className="workspace">
-          <aside className="sidebar" aria-label="Runs">
-            <RunList
-              runs={runs}
-              selectedId={route.runId}
-              loading={loading}
-              onSelect={(run) => { setSelected(run); navigate({ page: "runs", runId: run.run_id, tab: route.runId === run.run_id ? route.tab : "overview" }); }}
-            />
-          </aside>
-          <main className="main">
-            {selected ? (
-              <RunDetail state={selected} tab={route.tab} onTab={(tab) => navigate({ tab })} onCancel={() => void cancelRun()} />
-            ) : route.runId ? (
-              <p className="empty-inline">Loading run…</p>
-            ) : (
-              <Welcome hasRuns={runs.length > 0} onNew={() => setDialogOpen(true)} />
-            )}
-          </main>
-        </div>
-      )}
+      <main className="main">
+        {route.page === "benchmarks" && <Benchmarks onError={setError} />}
+        {route.page === "runs" && (
+          <RunsList runs={runs} loading={loading} onOpen={(runId) => navigate({ page: "run", runId, tab: "overview" })} onNew={() => setDialogOpen(true)} />
+        )}
+        {route.page === "run" && (
+          selected
+            ? <RunPage state={selected} tab={route.tab} onTab={(tab) => navigate({ page: "run", runId: route.runId, tab })} onCancel={() => void cancelRun()} />
+            : <div className="container"><p className="muted">Loading run…</p></div>
+        )}
+      </main>
 
       <NewRunDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onSubmit={startRun} />
-    </div>
-  );
-}
-
-function RunDetail({ state, tab, onTab, onCancel }: { state: ProjectState; tab: Tab; onTab: (tab: Tab) => void; onCancel: () => void }) {
-  const status = runStatus(state);
-  const started = startedAt(state);
-  return (
-    <div className="page">
-      <header className="page-header">
-        <div className="page-title">
-          <div className="page-title-row">
-            <h1>{repoName(state)}</h1>
-            <StatusPill status={status} />
-          </div>
-          <p className="page-subtitle">{state.objective}</p>
-          <p className="page-meta">
-            <span className="mono">{state.run_id.slice(0, 8)}</span>
-            <span>Started {relativeTime(started)}</span>
-            <span>{duration(runDuration(state))}</span>
-            {state.analysis?.languages?.length ? <span>{state.analysis.languages.map(label).join(", ")}</span> : null}
-          </p>
-        </div>
-        <div className="page-actions">
-          {!state.final_status && <button type="button" className="button button-danger" onClick={onCancel}>Cancel run</button>}
-          {state.report_path && <a className="button" href={api.reportUrl(state.run_id, "markdown")} download={`reforge-${state.run_id.slice(0, 8)}.md`}>Download report</a>}
-        </div>
-      </header>
-      <StageTimeline state={state} />
-      <nav className="tabs" aria-label="Run sections">
-        {TABS.map(([key, label]) => (
-          <button key={key} type="button" className={tab === key ? "active" : ""} aria-current={tab === key ? "page" : undefined} onClick={() => onTab(key)}>
-            {label}
-            {key === "tests" && state.test_runs.length > 0 && <span className="tab-count">{state.test_runs.length}</span>}
-          </button>
-        ))}
-      </nav>
-      <div className="tab-panel">
-        {tab === "overview" && <Overview state={state} onOpenTests={() => onTab("tests")} />}
-        {tab === "analysis" && <Analysis state={state} />}
-        {tab === "plan" && <Plan state={state} />}
-        {tab === "changes" && <Changes state={state} />}
-        {tab === "tests" && <Tests state={state} />}
-        {tab === "activity" && <Activity state={state} />}
-        {tab === "report" && <Report state={state} />}
-      </div>
-    </div>
-  );
-}
-
-function Welcome({ hasRuns, onNew }: { hasRuns: boolean; onNew: () => void }) {
-  return (
-    <div className="welcome">
-      <h1>{hasRuns ? "Select a run" : "Modernize a repository"}</h1>
-      <p className="muted">
-        ReForge analyzes a Python or JavaScript/TypeScript repository, freezes its current test behavior, applies a
-        modernization plan in a sandbox, and repairs any regressions before reporting.
-      </p>
-      <ol className="welcome-steps">
-        <li><strong>Point it at a repository</strong><span>A Git URL or a ZIP archive.</span></li>
-        <li><strong>Optionally set an objective</strong><span>Or let the analysis agent find the work.</span></li>
-        <li><strong>Review the result</strong><span>Plan, diff, test comparison, and a final report.</span></li>
-      </ol>
-      <button type="button" className="button button-primary" onClick={onNew}>New run</button>
     </div>
   );
 }

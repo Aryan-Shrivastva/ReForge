@@ -88,22 +88,6 @@ export function clockTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
-/** The most relevant explanation for a run that did not succeed. */
-export function failureReason(state: ProjectState): string | null {
-  const status = runStatus(state);
-  if (status !== "FAILED" && status !== "ABORTED" && status !== "PARTIAL") return null;
-  const baseline = state.test_runs.find((report) => report.phase === "baseline");
-  if (baseline && !baseline.install_ok) {
-    const lines = baseline.install_log_tail.trim().split("\n").filter((line) => line.trim());
-    const errorLine = lines.find((line) => /error|ERR!|failed/i.test(line)) ?? lines[0];
-    return `Dependency installation failed during the baseline${errorLine ? `: ${errorLine.trim()}` : "."}`;
-  }
-  const decisive = [...state.trace].reverse().find((event) =>
-    event.kind === "error" || (event.agent === "orchestrator" && event.kind === "decision" && /partial|incomplete|budget|cancel|regress/i.test(event.summary))
-  );
-  return decisive?.summary ?? null;
-}
-
 export function message(value: unknown): string {
   if (value instanceof Error) {
     try {

@@ -224,6 +224,9 @@ class ProjectState(StrictModel):
     baseline: TestReport | None = None
     baseline_pass_set: list[str] = Field(default_factory=list)
     protected_test_files: list[str] = Field(default_factory=list)
+    # True when the repository had no runnable tests and the baseline is
+    # per-file syntax checks only (behavior is then not verified).
+    smoke_baseline: bool = False
     test_runs: list[TestReport] = Field(default_factory=list)
     repairs: list[RepairAttempt] = Field(default_factory=list)
     replans: int = Field(default=0, ge=0)

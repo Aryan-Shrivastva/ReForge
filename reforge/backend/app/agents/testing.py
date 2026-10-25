@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from xml.etree import ElementTree
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
@@ -29,6 +30,11 @@ from ..tools.languages import (
 
 _ARTIFACT_PATH = ".reforge-artifacts/pytest-report.json"
 _JS_ARTIFACT_PATH = ".reforge-artifacts/js-test-report.json"
+_NODE_ARTIFACT_DIR = ".reforge-artifacts/node-tests"
+_NODE_TEST_EXTENSIONS = (".js", ".mjs", ".cjs")
+_SMOKE_MANIFEST = ".reforge-artifacts/smoke-files.txt"
+_SMOKE_MARKER = "REFORGE_SMOKE"
+_MAX_SMOKE_FILES = 2_000
 # npm's generated placeholder: "echo \"Error: no test specified\" && exit 1".
 _NPM_PLACEHOLDER_TEST = re.compile(r"no test specified")
 _TS_ERROR = re.compile(r"error TS\d+")
@@ -59,26 +65,32 @@ class TestRunner:
         run_mypy: bool = False,
         install_command: str | None = None,
         recreate_venv: bool = False,
+        smoke_checks: bool = False,
     ) -> TestReport:
         """Return a typed report from the repository's detected native toolchain(s).
 
         A polyglot repository (for example a Python API with a JavaScript
         frontend) runs both suites; the reports are merged so the baseline
-        protects both.
+        protects both.  ``smoke_checks`` adds a syntax check per source file,
+        the reduced baseline used when a repository has no runnable tests.
         """
         if not self._is_node_project():
-            return self._run_python_project(
+            report = self._run_python_project(
                 phase, run_mypy=run_mypy, install_command=install_command, recreate_venv=recreate_venv
             )
         # With a package.json present, Python metadata alone (e.g. a tooling-only
         # pyproject.toml) is not a Python suite; only real pytest tests are merged.
-        if self._has_python_tests():
+        elif self._has_python_tests():
             python_report = self._run_python_project(
                 phase, run_mypy=run_mypy, install_command=install_command, recreate_venv=recreate_venv
             )
             node_report = self._run_node_project(phase, recreate_dependencies=recreate_venv)
-            return self.merge_reports(python_report, node_report)
-        return self._run_node_project(phase, recreate_dependencies=recreate_venv)
+            report = self.merge_reports(python_report, node_report)
+        else:
+            report = self._run_node_project(phase, recreate_dependencies=recreate_venv)
+        if smoke_checks:
+            report = self.merge_reports(report, self._run_smoke_checks(phase))
+        return report
 
     @staticmethod
     def merge_reports(first: TestReport, second: TestReport) -> TestReport:
@@ -205,8 +217,13 @@ class TestRunner:
         has_test_script = bool(test_script) and not _NPM_PLACEHOLDER_TEST.search(test_script)
         framework = detect_js_test_framework(self.workspace)
 
+        generated = self._generated_js_test_files()
         report: TestReport | None = None
-        if framework is not None and (has_test_script or self._has_js_test_files()):
+        if framework == "node":
+            report = self._run_node_test_files(
+                sorted({*self._node_test_files(), *generated}), phase, self._tail(install), started
+            )
+        elif framework is not None and (has_test_script or self._has_js_test_files()):
             artifact = self.workspace / _JS_ARTIFACT_PATH
             artifact.parent.mkdir(parents=True, exist_ok=True)
             if artifact.exists():
@@ -231,29 +248,35 @@ class TestRunner:
         if report is None:
             command = "npm run test" if has_test_script else "npm run build" if "build" in scripts else None
             if command is None:
-                return TestReport(
+                report = TestReport(
                     phase=phase,
                     install_ok=True,
                     install_log_tail=self._tail(install),
                     duration_s=monotonic() - started,
                 )
-            check = self.sandbox.run(["/bin/sh", "-lc", command], phase="run", timeout=self.timeout_s)
-            test_id = "<npm-test>" if has_test_script else "<npm-build>"
-            succeeded = check.exit_code == 0 and not check.timed_out
-            report = TestReport(
-                phase=phase,
-                install_ok=True,
-                install_log_tail=self._tail(install),
-                passed=[test_id] if succeeded else [],
-                failed=[] if succeeded else [
-                    self._runner_failure(
-                        test_id,
-                        "npm test command failed" if has_test_script else "npm build check failed",
-                        check,
-                    )
-                ],
-                duration_s=monotonic() - started,
-            )
+            else:
+                check = self.sandbox.run(["/bin/sh", "-lc", command], phase="run", timeout=self.timeout_s)
+                test_id = "<npm-test>" if has_test_script else "<npm-build>"
+                succeeded = check.exit_code == 0 and not check.timed_out
+                report = TestReport(
+                    phase=phase,
+                    install_ok=True,
+                    install_log_tail=self._tail(install),
+                    passed=[test_id] if succeeded else [],
+                    failed=[] if succeeded else [
+                        self._runner_failure(
+                            test_id,
+                            "npm test command failed" if has_test_script else "npm build check failed",
+                            check,
+                        )
+                    ],
+                    duration_s=monotonic() - started,
+                )
+        # Characterization tests generated for a project whose own runner
+        # would not collect them (no framework, Mocha, a custom script) run on
+        # Node's built-in test runner.  Jest/Vitest/node:test already ran them.
+        if generated and framework not in {"jest", "vitest", "node"}:
+            report = self.merge_reports(report, self._run_node_test_files(generated, phase, "", started))
         # The native test command is the baseline gate.  ESLint is not run:
         # it repeats a full project traversal and is not a behaviour signal.
         # TypeScript type errors are, so `tsc --noEmit` is counted when the
@@ -413,6 +436,153 @@ class TestRunner:
             is_js_test_file(path.relative_to(self.workspace).as_posix())
             for path in iter_source_files(self.workspace, JS_LIKE_EXTENSIONS)
         )
+
+    def _generated_js_test_files(self) -> list[str]:
+        generated = self.workspace / "tests" / "reforge_generated"
+        if not generated.is_dir():
+            return []
+        return [
+            path.relative_to(self.workspace).as_posix()
+            for path in iter_source_files(generated, _NODE_TEST_EXTENSIONS)
+            if is_js_test_file(path.name)
+        ]
+
+    def _node_test_files(self) -> list[str]:
+        """Files Node's test runner would collect: ``*.test.*``/``*.spec.*`` and ``test/`` scripts."""
+        files: list[str] = []
+        for path in iter_source_files(self.workspace, _NODE_TEST_EXTENSIONS):
+            relative = path.relative_to(self.workspace).as_posix()
+            if is_js_test_file(relative) or relative.startswith("test/"):
+                files.append(relative)
+        return files
+
+    def _run_node_test_files(
+        self,
+        files: list[str],
+        phase: Literal["baseline", "post_transform", "post_repair"],
+        install_log_tail: str,
+        started: float,
+    ) -> TestReport:
+        """Run each file with ``node --test`` and a JUnit reporter, one report per file.
+
+        Node's JUnit output does not record which file a test came from, so
+        running files individually is what lets test ids carry the path
+        (``path::suite test``), consistent with pytest and Jest ids.
+        """
+        directory = self.workspace / _NODE_ARTIFACT_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        for stale in directory.glob("*.xml"):
+            stale.unlink()
+        if not files:
+            return TestReport(phase=phase, install_ok=True, install_log_tail=install_log_tail, duration_s=monotonic() - started)
+        commands = [
+            f"node --test --test-reporter=junit --test-reporter-destination={_NODE_ARTIFACT_DIR}/{index}.xml {shlex.quote(file)}"
+            for index, file in enumerate(files)
+        ]
+        run = self.sandbox.run(
+            ["/bin/sh", "-lc", f"mkdir -p {_NODE_ARTIFACT_DIR} && export CI=true; " + "; ".join(commands) + "; true"],
+            phase="run",
+            timeout=self.timeout_s,
+        )
+        passed: list[str] = []
+        failed: list[Failure] = []
+        errored: list[Failure] = []
+        skipped: list[str] = []
+        for index, file in enumerate(files):
+            artifact = directory / f"{index}.xml"
+            try:
+                parsed = self.parse_node_junit(artifact.read_text(encoding="utf-8"), file)
+            except (OSError, ElementTree.ParseError):
+                errored.append(self._js_failure(f"{file}::<load>", "test file produced no results", self._tail(run), file))
+                continue
+            passed.extend(parsed.passed)
+            failed.extend(parsed.failed)
+            skipped.extend(parsed.skipped)
+        if run.timed_out:
+            errored.append(self._runner_failure("<node-tests>", "node --test run timed out", run))
+        return TestReport(
+            phase=phase,
+            install_ok=True,
+            install_log_tail=install_log_tail,
+            passed=passed,
+            failed=failed,
+            errored=errored,
+            skipped=skipped,
+            duration_s=monotonic() - started,
+        )
+
+    @classmethod
+    def parse_node_junit(cls, xml_text: str, file: str) -> TestReport:
+        """Convert one file's ``node --test --test-reporter=junit`` output to a report."""
+        root = ElementTree.fromstring(xml_text)
+        passed: list[str] = []
+        failed: list[Failure] = []
+        skipped: list[str] = []
+
+        def visit(element: ElementTree.Element, prefix: list[str]) -> None:
+            for child in element:
+                name = child.get("name", "").strip()
+                if child.tag == "testsuite":
+                    visit(child, [*prefix, name] if name else prefix)
+                elif child.tag == "testcase":
+                    test_id = f"{file}::{' '.join([*prefix, name]).strip() or '<unnamed>'}"
+                    failure = child.find("failure")
+                    if failure is not None:
+                        detail = (failure.text or failure.get("message") or "").strip()
+                        failed.append(cls._js_failure(test_id, failure.get("message") or "test failed", detail, file))
+                    elif child.find("skipped") is not None:
+                        skipped.append(test_id)
+                    else:
+                        passed.append(test_id)
+
+        visit(root, [])
+        return TestReport(phase="baseline", install_ok=True, passed=passed, failed=failed, skipped=skipped, duration_s=0)
+
+    def _run_smoke_checks(self, phase: Literal["baseline", "post_transform", "post_repair"]) -> TestReport:
+        """Syntax-check every source file: the reduced baseline for repositories without tests.
+
+        Ids are ``smoke:syntax:<path>`` (deliberately without ``::`` so the
+        source files are never mistaken for protected test files).  Only
+        syntax is checked - modules are not imported, because importing an
+        application commonly opens database connections or starts servers.
+        """
+        started = monotonic()
+        files = [
+            path.relative_to(self.workspace).as_posix()
+            for path in iter_source_files(self.workspace, (".py", ".js", ".mjs", ".cjs"))
+        ]
+        files = [
+            file for file in files
+            if not file.startswith("tests/reforge_generated/") and ".min." not in file
+        ][:_MAX_SMOKE_FILES]
+        if not files:
+            return TestReport(phase=phase, install_ok=True, duration_s=monotonic() - started)
+        manifest = self.workspace / _SMOKE_MANIFEST
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        # POSIX newlines: the list is read by sh in the sandbox, and a CRLF
+        # file (Windows hosts) would append "\r" to every path.
+        manifest.write_text("\n".join(files) + "\n", encoding="utf-8", newline="\n")
+        script = (
+            f'while IFS= read -r f; do case "$f" in '
+            '*.py) python -c "import ast,sys; ast.parse(open(sys.argv[1],\'rb\').read(), sys.argv[1])" "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
+            '*) node --check "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
+            f'esac; printf \'{_SMOKE_MARKER} %s %s\\n\' "$r" "$f"; done < {_SMOKE_MANIFEST}'
+        )
+        result = self.sandbox.run(["/bin/sh", "-lc", script], phase="run", timeout=self.timeout_s)
+        passed: list[str] = []
+        failed: list[Failure] = []
+        for line in f"{result.stdout}\n{result.stderr}".splitlines():
+            if not line.startswith(f"{_SMOKE_MARKER} "):
+                continue
+            _, outcome, file = line.split(" ", 2)
+            test_id = f"smoke:syntax:{file}"
+            if outcome == "ok":
+                passed.append(test_id)
+            else:
+                failed.append(Failure(test_id=test_id, error_type="SyntaxError", message=f"{file} does not parse", traceback_excerpt="", file=file))
+        if result.timed_out:
+            failed.append(self._runner_failure("smoke:syntax", "syntax checks timed out", result))
+        return TestReport(phase=phase, install_ok=True, passed=passed, failed=failed, duration_s=monotonic() - started)
 
     def _uses_typescript(self) -> bool:
         package = read_package_json(self.workspace)

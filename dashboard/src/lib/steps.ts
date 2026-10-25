@@ -1,0 +1,186 @@
+import type { ProjectState, TestReport } from "../types";
+import { runStatus } from "./format";
+
+export type StepKey = "ANALYZE" | "PLAN" | "BASELINE" | "TRANSFORM" | "TEST" | "REPORT";
+export type StepStatus = "done" | "failed" | "warning" | "running" | "pending" | "skipped";
+
+export interface Step {
+  key: StepKey;
+  label: string;
+  status: StepStatus;
+  seconds: number | null;
+  summary: string;
+}
+
+const ORDER: StepKey[] = ["ANALYZE", "PLAN", "BASELINE", "TRANSFORM", "TEST", "REPORT"];
+const LABELS: Record<StepKey, string> = {
+  ANALYZE: "Analyze repository",
+  PLAN: "Plan changes",
+  BASELINE: "Record baseline",
+  TRANSFORM: "Apply changes",
+  TEST: "Verify behavior",
+  REPORT: "Write report",
+};
+/** REPAIR and REPLAN are loops inside verification. */
+const STAGE_TO_STEP: Record<string, StepKey> = {
+  ANALYZE: "ANALYZE", PLAN: "PLAN", BASELINE: "BASELINE", TRANSFORM: "TRANSFORM",
+  TEST: "TEST", REPAIR: "TEST", REPLAN: "TEST", REPORT: "REPORT", DONE: "REPORT",
+};
+
+/** Derive the six user-facing steps, their status, and timing from the trace. */
+export function buildSteps(state: ProjectState): Step[] {
+  const entered = new Map<StepKey, number>();
+  let furthest = -1;
+  for (const event of state.trace) {
+    const to = typeof event.data.to === "string" ? event.data.to : null;
+    if (!to) continue;
+    const key = STAGE_TO_STEP[to];
+    if (!key) continue;
+    if (!entered.has(key)) entered.set(key, new Date(event.ts).getTime());
+    if (key !== "REPORT") furthest = Math.max(furthest, ORDER.indexOf(key));
+  }
+  const end = state.trace.length ? new Date(state.trace[state.trace.length - 1].ts).getTime() : null;
+  const status = runStatus(state);
+  const finished = Boolean(state.final_status);
+  const current = finished ? -1 : ORDER.indexOf(STAGE_TO_STEP[state.stage] ?? "ANALYZE");
+  const stoppedAt = finished && status !== "SUCCESS" ? Math.max(furthest, 0) : -1;
+
+  return ORDER.map((key, index) => {
+    let stepStatus: StepStatus = "pending";
+    if (key === "REPORT") {
+      stepStatus = state.report_path ? "done" : finished ? "skipped" : "pending";
+    } else if (finished) {
+      // A successful run passed every step by definition, whatever the trace recorded.
+      if (status === "SUCCESS" || index < stoppedAt) stepStatus = "done";
+      else if (index === stoppedAt) stepStatus = status === "PARTIAL" ? "warning" : "failed";
+      else stepStatus = "skipped";
+    } else if (index < current) {
+      stepStatus = "done";
+    } else if (index === current) {
+      stepStatus = "running";
+    }
+    const start = entered.get(key);
+    const nextStart = ORDER.slice(index + 1).map((next) => entered.get(next)).find((value) => value !== undefined);
+    const stop = nextStart ?? (stepStatus === "running" ? Date.now() : end);
+    const seconds = start !== undefined && stop !== null && stepStatus !== "pending" && stepStatus !== "skipped"
+      ? Math.max((stop - start) / 1000, 0)
+      : null;
+    return { key, label: LABELS[key], status: stepStatus, seconds, summary: stepSummary(state, key, stepStatus) };
+  });
+}
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function stepSummary(state: ProjectState, key: StepKey, status: StepStatus): string {
+  if (status === "pending") return "Waiting";
+  if (status === "skipped") return "Not reached";
+  if (status === "running") return state.trace.at(-1)?.summary ?? "In progress";
+  const analysis = state.analysis;
+  const plan = state.plan;
+  const baselineAttempt = state.baseline ?? state.test_runs.find((report) => report.phase === "baseline");
+  const latest = state.test_runs.at(-1);
+  switch (key) {
+    case "ANALYZE":
+      if (!analysis) return "Analysis did not complete";
+      return [
+        analysis.languages?.length ? analysis.languages.map(languageName).join(", ") : null,
+        plural(analysis.dependencies.length, "dependency").replace("dependencys", "dependencies"),
+        plural(analysis.deprecated_patterns.length, "deprecated pattern"),
+      ].filter(Boolean).join(" · ");
+    case "PLAN":
+      return plan ? plural(plan.steps.length, "change") + " planned" : "No plan was produced";
+    case "BASELINE":
+      return baselineSummary(state, baselineAttempt);
+    case "TRANSFORM": {
+      if (!plan) return "Nothing to apply";
+      const applied = plan.steps.filter((step) => step.status === "applied").length;
+      const files = state.metrics.files_changed;
+      return `${applied} of ${plural(plan.steps.length, "change")} applied` + (files ? ` · ${plural(files, "file")} (+${state.metrics.lines_added} −${state.metrics.lines_removed})` : "");
+    }
+    case "TEST": {
+      if (!latest || latest === state.baseline) return "Not run";
+      const kept = state.baseline_pass_set.filter((id) => latest.passed.includes(id)).length;
+      const repairs = state.repairs.length ? ` after ${plural(state.repairs.length, "repair")}` : "";
+      return `${kept} of ${state.baseline_pass_set.length} baseline ${state.smoke_baseline ? "checks" : "tests"} pass${repairs}`;
+    }
+    case "REPORT":
+      return "Markdown and JSON report ready";
+  }
+}
+
+function baselineSummary(state: ProjectState, report: TestReport | undefined): string {
+  if (!report) return "Not run";
+  if (!report.install_ok) return "Dependencies failed to install";
+  if (state.smoke_baseline) return `No tests found · ${plural(state.baseline_pass_set.length, "syntax check")} recorded`;
+  if (!state.baseline_pass_set.length) return "No runnable tests found";
+  const generated = report.generated_tests ? " (includes generated tests)" : "";
+  return `${plural(state.baseline_pass_set.length, "passing test")} frozen${generated}`;
+}
+
+export function languageName(value: string): string {
+  return { javascript: "JavaScript", typescript: "TypeScript", python: "Python", java: "Java", kotlin: "Kotlin" }[value] ?? value;
+}
+
+export interface Explanation {
+  headline: string;
+  detail: string;
+  nextSteps: string[];
+}
+
+/** Plain-language account of the outcome, written for the person who started the run. */
+export function explain(state: ProjectState): Explanation {
+  const status = runStatus(state);
+  const baselineAttempt = state.baseline ?? state.test_runs.find((report) => report.phase === "baseline");
+  const plan = state.plan;
+  const applied = plan?.steps.filter((step) => step.status === "applied").length ?? 0;
+  const lastError = [...state.trace].reverse().find((event) => event.kind === "error")?.summary;
+
+  if (status === "RUNNING" || status === "QUEUED") {
+    return { headline: "Run in progress", detail: state.trace.at(-1)?.summary ?? "Waiting to start.", nextSteps: [] };
+  }
+  if (status === "SUCCESS") {
+    const checks = state.smoke_baseline ? "syntax checks" : "baseline tests";
+    return {
+      headline: `${plural(applied, "change")} applied safely`,
+      detail: `Every one of the ${state.baseline_pass_set.length} ${checks} recorded before the changes still passes${state.repairs.length ? `, after ${plural(state.repairs.length, "automatic repair")}` : ""}.`
+        + (state.smoke_baseline ? " This repository has no tests, so behavior itself was not verified." : ""),
+      nextSteps: ["Review the changes, then merge the work branch.", ...(state.smoke_baseline ? ["Add tests so future runs can verify behavior, not just syntax."] : [])],
+    };
+  }
+  if (status === "ABORTED") {
+    return { headline: "Run cancelled", detail: "The run was stopped before it finished. Nothing was merged.", nextSteps: ["Start a new run when ready."] };
+  }
+  if (baselineAttempt && !baselineAttempt.install_ok) {
+    return {
+      headline: "Dependencies could not be installed",
+      detail: "ReForge installs the project in an isolated sandbox before changing anything. The install failed, so no changes were made.",
+      nextSteps: [
+        "Open the Record baseline step to read the install log.",
+        "Check that the lockfile matches package.json / requirements and that the project installs on a clean machine.",
+      ],
+    };
+  }
+  if (baselineAttempt && !state.baseline_pass_set.length) {
+    return {
+      headline: "No tests to protect the changes",
+      detail: "ReForge only changes code it can verify. This repository has no runnable tests, generated tests did not pass, and no source file could be syntax-checked.",
+      nextSteps: ["Add a test script (for example with node:test, Jest, or pytest) and run again."],
+    };
+  }
+  if (status === "PARTIAL") {
+    return {
+      headline: applied ? `${applied} of ${plural(plan?.steps.length ?? 0, "change")} applied` : "No change could be applied",
+      detail: applied
+        ? "The applied changes keep every baseline check passing, but some planned changes could not be applied safely."
+        : "The planned changes could not be applied without breaking the rules ReForge enforces, so the code is unchanged.",
+      nextSteps: ["Open Apply changes to see why each change was skipped.", "Review the applied changes before merging."],
+    };
+  }
+  return {
+    headline: "Run failed",
+    detail: lastError ?? "The run stopped before completing.",
+    nextSteps: ["Open the failed step below for details.", "The Logs tab has the full event history."],
+  };
+}

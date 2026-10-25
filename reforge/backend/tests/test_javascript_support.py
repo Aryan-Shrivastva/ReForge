@@ -224,10 +224,13 @@ def test_generator_supports_jest_projects_and_enforces_js_paths(tmp_path: Path) 
         )
 
 
-def test_generator_declines_node_projects_without_a_supported_runner(tmp_path: Path) -> None:
-    write(tmp_path, {"package.json": json.dumps({"scripts": {"test": "node test.js"}}), "src/a.js": "x"})
+def test_generator_uses_node_test_for_projects_without_a_test_framework(tmp_path: Path) -> None:
+    write(tmp_path, {"package.json": json.dumps({"scripts": {"test": "echo \"Error: no test specified\" && exit 1"}}), "src/a.js": "x"})
+    generator = CharacterizationTestGenerator(executor=object())  # type: ignore[arg-type]
 
-    assert CharacterizationTestGenerator(executor=object()).supports(tmp_path) is False  # type: ignore[arg-type]
+    assert generator.supports(tmp_path) is True
+    assert generator._generation_framework(tmp_path) == "node"
+    assert generator._js_extension(tmp_path, "node") == ".test.js"
 
 
 @pytest.mark.parametrize(

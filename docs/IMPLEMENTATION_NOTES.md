@@ -296,7 +296,29 @@ To run the unit suite: `python -m pip install -e ".[dev]"`, then `python -m pyte
 
 **Clean-up on hosts that ran the old build:** `sudo rm -rf /app/runs`, plus `sudo rmdir /app` if it is now empty. Both were created by Docker, not by you.
 
-### Dashboard redesign
+### Repositories without tests
+
+After the mount fix, CharitEase installed successfully (`added 106 packages`) but still failed. Its only test script is npm's placeholder, so there was no baseline to protect changes. ReForge now handles these repositories in two steps.
+
+1. **Generated `node:test` tests.** For JavaScript projects without Jest or Vitest, the generator writes characterization tests for Node's built-in test runner. That needs no dependencies, and Node 22 is in the sandbox.
+   - The runner executes each file with `node --test --test-reporter=junit`, one file at a time, so test IDs are `path::suite test`.
+   - Projects whose own test script is `node --test` are also detected and run this way.
+2. **Syntax-check baseline.** If no test passes even after generation, the baseline becomes one syntax check per source file: `node --check` for JavaScript and `ast.parse` for Python. Modules are not imported, because importing an app often connects to a database or starts a server.
+   - The run proceeds and the checks guard every change.
+   - The run record sets `smoke_baseline: true`, and the dashboard and report state plainly that behavior was not tested.
+
+Both paths were verified with real Node 22 and Python against a framework-free project.
+
+### Dashboard: deployment-console layout (Vercel/Railway style)
+
+- **Runs page:** a full-width list showing repository, status, run ID, duration and age, with search and filters.
+- **Run page:** a large status header, then a *What happened* card in plain language with next steps.
+- **Steps:** a vertical list (Analyze → Plan → Record baseline → Apply changes → Verify → Write report). Each step shows a status icon, duration and a one-line result, and expands to its details: the install log, the tests recorded, the plan, per-change errors and repairs.
+- **Changes:** per-file colored diffs.
+- **Logs:** a terminal-style event stream.
+- **Theme:** light only, with Geist type.
+
+### Dashboard redesign (first pass, superseded by the layout above)
 
 - **Look:** neutral, light-only styling with no gradients or glows.
 - **Run list:** runs are named by repository, with search and status filters.

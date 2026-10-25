@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Benchmark, EvaluationSummary } from "../types";
 import { duration, message, percent } from "../lib/format";
-import { DataTable, Panel, Stat, StatGrid, Tag } from "../components/ui";
+import { Chip, Meta } from "../components/ui";
 
 export function Benchmarks({ onError }: { onError: (value: string) => void }) {
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
@@ -25,52 +25,38 @@ export function Benchmarks({ onError }: { onError: (value: string) => void }) {
   };
 
   return (
-    <div className="page">
-      <header className="page-header">
+    <div className="container">
+      <header className="page-head">
         <div>
           <h1>Benchmarks</h1>
-          <p className="muted">Controlled fixtures with known deprecations, used to measure success rate and behavior preservation.</p>
+          <p className="muted">Controlled repositories with known deprecations. Running the suite measures success rate and behavior preservation.</p>
         </div>
-        <button type="button" className="button button-primary" onClick={() => void run()} disabled={busy}>
-          {busy ? "Running suite…" : "Run suite (3×)"}
-        </button>
+        <button type="button" className="btn btn-primary" onClick={() => void run()} disabled={busy}>{busy ? "Running suite…" : "Run suite (3×)"}</button>
       </header>
-      <div className="view-stack">
-        <Panel title={`Fixtures (${benchmarks.length})`} flush>
-          <DataTable
-            columns={["Benchmark", "Existing tests", "Objective"]}
-            empty="No benchmarks found."
-            rows={benchmarks.map((item) => [
-              <span className="mono">{item.name}</span>,
-              <Tag tone={item.has_tests ? "good" : "warn"}>{item.has_tests ? "Yes" : "No"}</Tag>,
-              item.objective,
-            ])}
-          />
-        </Panel>
-        {summary && (
-          <>
-            <StatGrid>
-              <Stat label="Success rate" value={percent(summary.success_rate)} />
-              <Stat label="Partial rate" value={percent(summary.partial_rate)} />
-              <Stat label="Runs" value={summary.runs.length} />
-            </StatGrid>
-            <Panel title="Results" flush>
-              <DataTable
-                columns={["Benchmark", "Status", "Behavior preserved", "Repairs", "Replans", "Regressions", "Duration"]}
-                rows={summary.runs.map((item) => [
-                  <span className="mono">{item.benchmark}</span>,
-                  item.status ?? "—",
-                  percent(item.behavior_preservation),
-                  item.repair_iterations,
-                  item.replans,
-                  item.regressions_introduced,
-                  duration(item.wall_clock_s),
-                ])}
-              />
-              {summary.artifact_path && <p className="table-footnote">Saved to <span className="mono">{summary.artifact_path}</span></p>}
-            </Panel>
-          </>
-        )}
+      {summary && (
+        <Meta
+          items={[
+            ["Success rate", percent(summary.success_rate)],
+            ["Partial rate", percent(summary.partial_rate)],
+            ["Runs", String(summary.runs.length)],
+          ]}
+        />
+      )}
+      <div className="list">
+        {benchmarks.map((item) => {
+          const results = summary?.runs.filter((run) => run.benchmark === item.name) ?? [];
+          return (
+            <div key={item.name} className="list-row list-row-static">
+              <span className="list-main">
+                <span className="list-title mono">{item.name}</span>
+                <span className="list-sub">{item.objective}</span>
+              </span>
+              <span className="list-status"><Chip tone={item.has_tests ? "good" : "warn"}>{item.has_tests ? "Has tests" : "No tests"}</Chip></span>
+              <span className="list-meta">{results.length ? `${results.filter((run) => run.status === "SUCCESS").length}/${results.length} ready` : ""}</span>
+              <span className="list-meta">{results.length ? duration(results.reduce((sum, run) => sum + run.wall_clock_s, 0) / results.length) : ""}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -50,7 +50,7 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
         <div className="dialog-body">
           <fieldset className="field">
             <legend>Repository source</legend>
-            <div className="segmented">
+            <div className="filters">
               <button type="button" className={source === "git" ? "active" : ""} onClick={() => setSource("git")}>Git URL</button>
               <button type="button" className={source === "zip" ? "active" : ""} onClick={() => setSource("zip")}>ZIP archive</button>
             </div>
@@ -59,6 +59,7 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
             <label className="field">
               <span>Repository URL</span>
               <input
+                className="input"
                 value={repoUrl}
                 onChange={(event) => setRepoUrl(event.target.value)}
                 placeholder="https://github.com/org/repository.git"
@@ -70,13 +71,14 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
           ) : (
             <label className="field">
               <span>ZIP archive</span>
-              <input type="file" accept=".zip" onChange={(event) => setUpload(event.target.files?.[0])} required />
+              <input className="input" type="file" accept=".zip" onChange={(event) => setUpload(event.target.files?.[0])} required />
               <small>The project root, or a single top-level folder such as GitHub's "Download ZIP".</small>
             </label>
           )}
           <label className="field">
             <span>Objective <em>optional</em></span>
             <textarea
+              className="input"
               value={objective}
               onChange={(event) => setObjective(event.target.value)}
               rows={3}
@@ -86,8 +88,8 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
           </label>
         </div>
         <footer className="dialog-footer">
-          <button type="button" className="button" onClick={onClose}>Cancel</button>
-          <button type="submit" className="button button-primary" disabled={!ready || busy}>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={!ready || busy}>
             {busy ? "Starting…" : "Start run"}
           </button>
         </footer>

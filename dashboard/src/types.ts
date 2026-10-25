@@ -45,6 +45,8 @@ export interface ProjectState {
   baseline: TestReport | null;
   baseline_pass_set: string[];
   protected_test_files: string[];
+  /** True when the repository had no runnable tests and the baseline is syntax checks only. */
+  smoke_baseline?: boolean;
   test_runs: TestReport[];
   repairs: RepairAttempt[];
   replans: number;

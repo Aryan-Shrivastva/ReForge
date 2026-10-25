@@ -67,6 +67,9 @@ class ReportGenerator:
             "plan": state.plan.model_dump(mode="json") if state.plan else None,
             "changes": changes,
             "tests": {
+                "baseline_kind": "syntax_checks" if state.smoke_baseline else (
+                    "generated" if state.baseline and state.baseline.generated_tests else "repository"
+                ),
                 "baseline": self._test_summary(state.baseline),
                 "final": self._test_summary(latest),
                 "baseline_pass_set": state.baseline_pass_set,
@@ -138,6 +141,8 @@ class ReportGenerator:
     @staticmethod
     def _follow_ups(state: ProjectState, unresolved: list[str]) -> list[str]:
         follow_ups = ["Review the generated diff and commit history before merging."]
+        if state.smoke_baseline:
+            follow_ups.append("Add automated tests: this run could only check that the code installs and parses.")
         if state.baseline and state.baseline.generated_tests:
             follow_ups.append("Review generated characterization tests before treating them as permanent product tests.")
         if unresolved:
@@ -227,6 +232,12 @@ class ReportGenerator:
         else:
             lines.append("- No Git diff available.")
         lines.extend(["", "## Tests", ""])
+        if tests.get("baseline_kind") == "syntax_checks":
+            lines.extend([
+                "> **Reduced verification.** The repository has no runnable tests and no generated characterization",
+                "> test passed, so changes were verified only to install and to parse. Behavior was not tested.",
+                "",
+            ])
         for label in ("baseline", "final"):
             report = tests[label]
             lines.append(f"- **{label.title()}:** {report if report is not None else 'not available'}")

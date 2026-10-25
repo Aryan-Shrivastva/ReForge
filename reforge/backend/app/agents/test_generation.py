@@ -26,6 +26,19 @@ GENERATED_DIRECTORY = "tests/reforge_generated/"
 # Bounded source context keeps one generation call within a predictable token budget.
 _MAX_SOURCE_CHARS = 60_000
 
+_FRAMEWORK_NAMES = {"jest": "Jest", "vitest": "Vitest", "node": "Node.js built-in test runner (node:test)"}
+_FRAMEWORK_NOTES = {
+    "jest": "Jest globals (describe, it, expect) are available without imports. ",
+    "vitest": "Import describe, it, and expect from 'vitest'. ",
+    "node": (
+        "Use only Node built-ins: load the runner with require('node:test') (or import test from 'node:test') and "
+        "assertions from 'node:assert/strict'; do not use Jest, Vitest, Mocha, or any npm test package. "
+        "Many application modules connect to a database or start a server when loaded: only load modules whose "
+        "top level is side-effect free (pure helpers, validators, formatters, data transforms), and skip route, "
+        "server, database, and browser DOM scripts entirely. "
+    ),
+}
+
 
 class CharacterizationPathError(ValueError):
     """Raised when generated tests fall outside their dedicated baseline directory."""
@@ -55,7 +68,7 @@ class CharacterizationTestGenerator(StructuredAgent):
         repository = self.repository_factory(workspace)
         files = [path for path in repository.list_tree() if not is_skipped(path)]
         language = self._language(workspace) or "python"
-        framework = detect_js_test_framework(workspace) if language == "javascript" else None
+        framework = self._generation_framework(workspace) if language == "javascript" else None
         extension = ".py" if language == "python" else self._js_extension(workspace, framework)
         if language == "python":
             prompt = TEST_GENERATION_PROMPT.format(
@@ -68,12 +81,8 @@ class CharacterizationTestGenerator(StructuredAgent):
             package = read_package_json(workspace)
             prompt = JS_TEST_GENERATION_PROMPT.format(
                 objective=objective,
-                framework=framework or "jest",
-                framework_note=(
-                    "Import describe, it, and expect from 'vitest'. "
-                    if framework == "vitest"
-                    else "Jest globals (describe, it, expect) are available without imports. "
-                ),
+                framework=_FRAMEWORK_NAMES[framework or "node"],
+                framework_note=_FRAMEWORK_NOTES[framework or "node"],
                 module_system="ES modules (import/export)" if package.get("type") == "module" else "CommonJS (require/module.exports)",
                 extension=extension,
                 files=json.dumps(files),
@@ -97,11 +106,12 @@ class CharacterizationTestGenerator(StructuredAgent):
     def supports(self, workspace: Path) -> bool:
         """Return whether this generator can write native, executable tests for the stack.
 
-        Python projects get pytest files.  JavaScript/TypeScript projects are
-        supported when they use Jest or Vitest, whose default test discovery
-        collects ``tests/reforge_generated/*.test.js``.  Other stacks are not
-        given synthetic tests: Python filesystem checks for a JavaScript, Java,
-        or Kotlin project are neither native tests nor useful coverage.
+        Python projects get pytest files.  JavaScript projects get tests for
+        their own Jest or Vitest setup, and otherwise tests for Node's built-in
+        ``node:test`` runner, which needs no dependency, so a project with no
+        test framework at all can still be given a behavioral baseline.  Other
+        stacks are not given synthetic tests: Python filesystem checks for a
+        Java or Kotlin project are neither native tests nor useful coverage.
         """
         language = self._language(workspace)
         if language is None:
@@ -117,7 +127,7 @@ class CharacterizationTestGenerator(StructuredAgent):
     def write(self, workspace: Path, proposal: TestGenerationProposal) -> list[str]:
         """Create proposed files once; callers test and retain or drop them."""
         language = self._language(workspace) or "python"
-        extension = ".py" if language == "python" else self._js_extension(workspace, detect_js_test_framework(workspace))
+        extension = ".py" if language == "python" else self._js_extension(workspace, self._generation_framework(workspace))
         self._validate_paths(proposal, language, extension)
         repository = self.repository_factory(workspace)
         paths: list[str] = []
@@ -132,8 +142,14 @@ class CharacterizationTestGenerator(StructuredAgent):
         # symlinks in node_modules on a Windows bind mount, which are unsafe to
         # inspect from the host filesystem.
         if (workspace / "package.json").is_file():
-            return "javascript" if detect_js_test_framework(workspace) in {"jest", "vitest"} else None
+            return "javascript"
         return "python"
+
+    @staticmethod
+    def _generation_framework(workspace: Path) -> str:
+        """Jest/Vitest when the project uses one (its discovery collects the files), else node:test."""
+        framework = detect_js_test_framework(workspace)
+        return framework if framework in {"jest", "vitest"} else "node"
 
     @staticmethod
     def _js_extension(workspace: Path, framework: str | None) -> str:

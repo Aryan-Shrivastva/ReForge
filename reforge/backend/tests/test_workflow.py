@@ -232,7 +232,8 @@ def test_m5_fails_when_no_baseline_test_passes_and_still_persists(tmp_path: Path
 
     assert result.stage.value == "DONE"
     assert result.final_status is not None and result.final_status.value == "FAILED"
-    assert testing.phases == ["baseline"]
+    # The empty baseline is retried once with syntax checks before failing.
+    assert testing.phases == ["baseline", "baseline"]
     assert runner.state_store.load("workflow-no-baseline").metrics.wall_clock_s >= 0
 
 

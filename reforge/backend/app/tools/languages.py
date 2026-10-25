@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 Language = Literal["python", "javascript", "typescript", "java", "kotlin"]
-JsTestFramework = Literal["jest", "vitest", "mocha"]
+JsTestFramework = Literal["jest", "vitest", "mocha", "node"]
 
 SKIPPED_DIRECTORIES = frozenset(
     {
@@ -177,7 +177,11 @@ def package_dependency_names(package: dict[str, object]) -> set[str]:
 
 
 def detect_js_test_framework(workspace: Path) -> JsTestFramework | None:
-    """Detect a JSON-reporting test framework from the manifest and test script."""
+    """Detect the project's test framework from the manifest and test script.
+
+    Jest, Vitest, and Mocha report JSON; ``node`` is Node's built-in
+    ``node --test`` runner (JUnit reporter).
+    """
     package = read_package_json(workspace)
     if not package:
         return None
@@ -186,6 +190,9 @@ def detect_js_test_framework(workspace: Path) -> JsTestFramework | None:
     for framework in ("vitest", "jest", "mocha"):
         if re.search(rf"\b{framework}\b", test_script):
             return framework  # type: ignore[return-value]
+    # Node's built-in runner: "node --test", optionally with other flags.
+    if re.search(r"\bnode\b[^&|;]*\s--test\b", test_script):
+        return "node"
     for framework in ("vitest", "jest", "mocha"):
         if framework in dependencies:
             return framework  # type: ignore[return-value]

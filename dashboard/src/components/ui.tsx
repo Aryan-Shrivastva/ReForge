@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
 import type { RunStatus } from "../lib/format";
+import type { StepStatus } from "../lib/steps";
 
-const STATUS_LABEL: Record<string, string> = {
-  SUCCESS: "Succeeded",
+const STATUS_TEXT: Record<RunStatus, string> = {
+  SUCCESS: "Ready",
   PARTIAL: "Partial",
   FAILED: "Failed",
   ABORTED: "Cancelled",
@@ -10,54 +11,55 @@ const STATUS_LABEL: Record<string, string> = {
   QUEUED: "Queued",
 };
 
-export function StatusPill({ status }: { status: RunStatus }) {
+/** Deployment-style status: a coloured dot and a word. */
+export function Status({ status, size = "md" }: { status: RunStatus; size?: "md" | "lg" }) {
   return (
-    <span className={`pill pill-${status.toLowerCase()}`}>
-      <span className="pill-dot" aria-hidden="true" />
-      {STATUS_LABEL[status] ?? status}
+    <span className={`status status-${status.toLowerCase()} status-${size}`}>
+      <span className="status-dot" aria-hidden="true" />
+      {STATUS_TEXT[status]}
     </span>
   );
 }
 
-/** Small neutral label for step, test, and trace states. */
-export function Tag({ tone = "neutral", children }: { tone?: "neutral" | "good" | "bad" | "warn" | "info"; children: ReactNode }) {
-  return <span className={`tag tag-${tone}`}>{children}</span>;
+export function StepIcon({ status }: { status: StepStatus }) {
+  if (status === "running") return <span className="step-icon step-icon-running" aria-label="Running" />;
+  const paths: Record<Exclude<StepStatus, "running">, ReactNode> = {
+    done: <path d="M4.5 8.2 7 10.6l4.6-5.2" />,
+    failed: <path d="m5.2 5.2 5.6 5.6m0-5.6-5.6 5.6" />,
+    warning: <path d="M8 4.6v4.2m0 2.4v.2" />,
+    pending: null,
+    skipped: <path d="M5 8h6" />,
+  };
+  return (
+    <svg className={`step-icon step-icon-${status}`} viewBox="0 0 16 16" width="16" height="16" aria-label={status}>
+      <circle cx="8" cy="8" r="7.25" />
+      {paths[status]}
+    </svg>
+  );
 }
 
-export function Panel({ title, actions, children, flush = false }: { title?: ReactNode; actions?: ReactNode; children: ReactNode; flush?: boolean }) {
+export function Chip({ tone = "neutral", children }: { tone?: "neutral" | "good" | "bad" | "warn" | "info"; children: ReactNode }) {
+  return <span className={`chip chip-${tone}`}>{children}</span>;
+}
+
+export function Section({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
   return (
-    <section className={`panel${flush ? " panel-flush" : ""}`}>
-      {(title || actions) && (
-        <header className="panel-header">
-          {title && <h2>{title}</h2>}
-          {actions && <div className="panel-actions">{actions}</div>}
-        </header>
-      )}
-      <div className="panel-body">{children}</div>
+    <section className="section">
+      <header className="section-header">
+        <h2>{title}</h2>
+        {aside}
+      </header>
+      {children}
     </section>
   );
 }
 
-export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
+export function Meta({ items }: { items: Array<[string, ReactNode]> }) {
   return (
-    <div className="stat">
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-      {hint && <p className="stat-hint">{hint}</p>}
-    </div>
-  );
-}
-
-export function StatGrid({ children }: { children: ReactNode }) {
-  return <dl className="stat-grid">{children}</dl>;
-}
-
-export function KeyValues({ items }: { items: Array<[string, ReactNode]> }) {
-  return (
-    <dl className="kv">
-      {items.map(([key, value]) => (
-        <div key={key} className="kv-row">
-          <dt>{key}</dt>
+    <dl className="meta">
+      {items.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
           <dd>{value}</dd>
         </div>
       ))}
@@ -65,37 +67,6 @@ export function KeyValues({ items }: { items: Array<[string, ReactNode]> }) {
   );
 }
 
-export function DataTable({ columns, rows, empty = "Nothing to show." }: { columns: string[]; rows: ReactNode[][]; empty?: string }) {
-  if (!rows.length) return <p className="empty-inline">{empty}</p>;
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-export function Callout({ tone, title, children }: { tone: "bad" | "warn" | "info"; title: string; children?: ReactNode }) {
-  return (
-    <div className={`callout callout-${tone}`} role={tone === "bad" ? "alert" : "status"}>
-      <strong>{title}</strong>
-      {children && <div className="callout-body">{children}</div>}
-    </div>
-  );
-}
-
-export function Waiting({ what }: { what: string }) {
-  return <p className="empty-inline">{what} will appear here once the run reaches that stage.</p>;
-}
-
-export function Code({ children }: { children: ReactNode }) {
-  return <code className="code-inline">{children}</code>;
+export function Muted({ children }: { children: ReactNode }) {
+  return <p className="muted">{children}</p>;
 }
