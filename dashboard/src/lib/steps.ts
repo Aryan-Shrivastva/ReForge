@@ -1,8 +1,8 @@
 import type { ProjectState, TestReport } from "../types";
 import { runStatus } from "./format";
 
-export type StepKey = "ANALYZE" | "PLAN" | "BASELINE" | "TRANSFORM" | "TEST" | "REPORT";
-export type StepStatus = "done" | "failed" | "warning" | "running" | "pending" | "skipped";
+export type StepKey = "ANALYZE" | "PLAN" | "BASELINE" | "APPROVE" | "TRANSFORM" | "TEST" | "REPORT";
+export type StepStatus = "done" | "failed" | "warning" | "running" | "waiting" | "pending" | "skipped";
 
 export interface Step {
   key: StepKey;
@@ -12,23 +12,26 @@ export interface Step {
   summary: string;
 }
 
-const ORDER: StepKey[] = ["ANALYZE", "PLAN", "BASELINE", "TRANSFORM", "TEST", "REPORT"];
+const ALL_STEPS: StepKey[] = ["ANALYZE", "PLAN", "BASELINE", "APPROVE", "TRANSFORM", "TEST", "REPORT"];
 const LABELS: Record<StepKey, string> = {
   ANALYZE: "Analyze repository",
   PLAN: "Plan changes",
   BASELINE: "Record baseline",
+  APPROVE: "Approve plan",
   TRANSFORM: "Apply changes",
   TEST: "Verify behavior",
   REPORT: "Write report",
 };
 /** REPAIR and REPLAN are loops inside verification. */
 const STAGE_TO_STEP: Record<string, StepKey> = {
-  ANALYZE: "ANALYZE", PLAN: "PLAN", BASELINE: "BASELINE", TRANSFORM: "TRANSFORM",
+  ANALYZE: "ANALYZE", PLAN: "PLAN", BASELINE: "BASELINE", AWAIT_APPROVAL: "APPROVE", TRANSFORM: "TRANSFORM",
   TEST: "TEST", REPAIR: "TEST", REPLAN: "TEST", REPORT: "REPORT", DONE: "REPORT",
 };
 
 /** Derive the six user-facing steps, their status, and timing from the trace. */
 export function buildSteps(state: ProjectState): Step[] {
+  // The approval step exists only for runs that require a human decision.
+  const ORDER = ALL_STEPS.filter((key) => key !== "APPROVE" || state.requires_approval || (state.reviews ?? []).length > 0);
   const entered = new Map<StepKey, number>();
   let furthest = -1;
   for (const event of state.trace) {
@@ -57,7 +60,7 @@ export function buildSteps(state: ProjectState): Step[] {
     } else if (index < current) {
       stepStatus = "done";
     } else if (index === current) {
-      stepStatus = "running";
+      stepStatus = key === "APPROVE" ? "waiting" : "running";
     }
     const start = entered.get(key);
     const nextStart = ORDER.slice(index + 1).map((next) => entered.get(next)).find((value) => value !== undefined);
@@ -76,6 +79,7 @@ function plural(count: number, word: string): string {
 function stepSummary(state: ProjectState, key: StepKey, status: StepStatus): string {
   if (status === "pending") return "Waiting";
   if (status === "skipped") return "Not reached";
+  if (status === "waiting") return "Waiting for your approval";
   if (status === "running") return state.trace.at(-1)?.summary ?? "In progress";
   const analysis = state.analysis;
   const plan = state.plan;
@@ -93,11 +97,23 @@ function stepSummary(state: ProjectState, key: StepKey, status: StepStatus): str
       return plan ? plural(plan.steps.length, "change") + " planned" : "No plan was produced";
     case "BASELINE":
       return baselineSummary(state, baselineAttempt);
+    case "APPROVE": {
+      const review = (state.reviews ?? []).at(-1);
+      const revisions = (state.reviews ?? []).filter((item) => item.decision === "revision_requested").length;
+      const revised = revisions ? ` after ${plural(revisions, "revision")}` : "";
+      if (review?.decision === "rejected") return "You rejected the plan";
+      if (review?.decision === "approved") {
+        const total = review.approved_steps.length + review.declined_steps.length;
+        return `Approved ${review.approved_steps.length} of ${plural(total, "change")}${revised}`;
+      }
+      return "Not approved";
+    }
     case "TRANSFORM": {
       if (!plan) return "Nothing to apply";
       const applied = plan.steps.filter((step) => step.status === "applied").length;
+      const approved = plan.steps.filter((step) => step.status !== "declined").length;
       const files = state.metrics.files_changed;
-      return `${applied} of ${plural(plan.steps.length, "change")} applied` + (files ? ` · ${plural(files, "file")} (+${state.metrics.lines_added} −${state.metrics.lines_removed})` : "");
+      return `${applied} of ${plural(approved, "approved change")} applied` + (files ? ` · ${plural(files, "file")} (+${state.metrics.lines_added} −${state.metrics.lines_removed})` : "");
     }
     case "TEST": {
       if (!latest || latest === state.baseline) return "Not run";
@@ -137,6 +153,14 @@ export function explain(state: ProjectState): Explanation {
   const applied = plan?.steps.filter((step) => step.status === "applied").length ?? 0;
   const lastError = [...state.trace].reverse().find((event) => event.kind === "error")?.summary;
 
+  if (status === "AWAITING") {
+    const tests = state.smoke_baseline ? "syntax checks" : "tests";
+    return {
+      headline: "Your approval is needed",
+      detail: `ReForge analyzed the repository, recorded ${plural(state.baseline_pass_set.length, `baseline ${tests.replace(/s$/, "")}`)}, and proposes ${plural(plan?.steps.length ?? 0, "change")}. Nothing has been changed yet, and nothing will be until you decide.`,
+      nextSteps: ["Review the proposed changes below.", "Approve all or some of them, ask for changes, or reject the plan."],
+    };
+  }
   if (status === "RUNNING" || status === "QUEUED") {
     return { headline: "Run in progress", detail: state.trace.at(-1)?.summary ?? "Waiting to start.", nextSteps: [] };
   }
@@ -150,6 +174,14 @@ export function explain(state: ProjectState): Explanation {
     };
   }
   if (status === "ABORTED") {
+    const review = (state.reviews ?? []).at(-1);
+    if (review?.decision === "rejected") {
+      return {
+        headline: "Plan rejected",
+        detail: `You rejected the proposed plan, so no code was changed.${review.feedback ? ` Your note: "${review.feedback}"` : ""}`,
+        nextSteps: ["Rerun the project to get a new proposal."],
+      };
+    }
     return { headline: "Run cancelled", detail: "The run was stopped before it finished. Nothing was merged.", nextSteps: ["Start a new run when ready."] };
   }
   if (baselineAttempt && !baselineAttempt.install_ok) {

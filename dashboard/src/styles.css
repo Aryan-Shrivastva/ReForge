@@ -314,3 +314,31 @@ input[type="file"].input { padding: 7px 10px; }
   .log-line { grid-template-columns: 64px minmax(0, 1fr); }
   .log-source { display: none; }
 }
+
+/* ---------- Human approval ---------- */
+.status-awaiting .status-dot { background: var(--warning); animation: pulse 1.6s ease-in-out infinite; }
+.summary-awaiting { border-left-color: var(--warning); }
+.step-icon-waiting circle { fill: var(--warning); stroke: var(--warning); }
+.step-icon-waiting path { stroke: #fff; stroke-width: 1.8; }
+.step-waiting .step-summary { color: var(--warning); font-weight: 500; }
+
+.approval { display: grid; gap: 16px; padding: 24px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }
+.approval-head h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+.approval-head p { max-width: 760px; margin-top: 6px; }
+.approval-note { padding: 10px 14px; border-radius: var(--radius-sm); background: var(--warning-bg); color: #8a4b00; font-size: 13px; overflow-wrap: anywhere; }
+.proposal { display: grid; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.proposal-item { border-bottom: 1px solid var(--line); }
+.proposal-item:last-child { border-bottom: 0; }
+.proposal-check { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 14px; padding: 14px 16px; cursor: pointer; }
+.proposal-check:hover { background: var(--bg-subtle); }
+.proposal-check input { width: 16px; height: 16px; margin-top: 3px; accent-color: var(--fg); }
+.proposal-body { display: grid; gap: 4px; min-width: 0; }
+.proposal-title { font-weight: 500; }
+.proposal-id { margin-right: 10px; color: var(--fg-3); }
+.proposal-meta { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--fg-3); font-size: 12px; overflow-wrap: anywhere; }
+.proposal-warn { color: var(--warning); font-size: 13px; }
+.proposal-off .proposal-title, .proposal-off .muted { opacity: 0.55; }
+.approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.approval-hint { margin-left: auto; font-size: 13px; }
+.approval-feedback { display: grid; gap: 12px; }
+@media (max-width: 640px) { .approval { padding: 16px; } .approval-hint { margin-left: 0; } }

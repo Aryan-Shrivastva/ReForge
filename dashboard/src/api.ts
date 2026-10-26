@@ -38,6 +38,12 @@ export const api = {
     request<ProjectState>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   deleteRun: (runId: string) =>
     request<{ deleted: boolean }>(`/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
+  reviewPlan: (runId: string, review: { decision: "approved" | "revision_requested" | "rejected"; approved_steps?: string[]; feedback?: string }) =>
+    request<ProjectState>(`/runs/${encodeURIComponent(runId)}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(review)
+    }),
   rerun: (runId: string) =>
     request<{ run_id: string }>(`/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),
   createRun: async (input: { objective?: string; repoUrl?: string; upload?: File }) => {

@@ -187,5 +187,5 @@ def test_repair_retries_an_unapplicable_patch_with_current_source_context() -> N
     assert result.diagnosis == "Corrected attempt"
     assert repository.applied == [first, second]
     assert '"legacy.py": "def legacy()' in llm.prompts[0]
-    assert "previous repair patch was rejected" in llm.prompts[1]
+    assert "previous repair was rejected" in llm.prompts[1]
     assert "patch does not apply" in llm.prompts[1]

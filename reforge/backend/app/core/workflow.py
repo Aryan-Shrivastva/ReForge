@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
@@ -22,6 +23,7 @@ from ..core.state import (
     DeprecatedPattern,
     FinalStatus,
     Plan,
+    PlanReview,
     ProjectState,
     Stage,
     TestReport,
@@ -87,6 +89,7 @@ class WorkflowRunner:
         report_generator: ReportGenerator | None = None,
         default_budgets: Budgets | None = None,
         executors: AgentExecutors | None = None,
+        require_plan_approval: bool = False,
     ) -> None:
         self.analysis_agent = analysis_agent
         self.planning_agent = planning_agent
@@ -107,6 +110,8 @@ class WorkflowRunner:
         self.report_generator = report_generator or ReportGenerator(catalog)
         self.default_budgets = default_budgets or Budgets()
         self.executors = executors
+        # Human-in-the-loop: pause at AWAIT_APPROVAL before applying any plan.
+        self.require_plan_approval = require_plan_approval
 
     @classmethod
     def live(cls, settings: Settings, *, runs_root: Path = Path("runs")) -> "WorkflowRunner":
@@ -141,6 +146,7 @@ class WorkflowRunner:
             allow_dependency_rollback_fallback=settings.allow_dependency_rollback_fallback,
             default_budgets=budgets_from_settings(settings),
             executors=executors,
+            require_plan_approval=settings.require_plan_approval,
         )
 
     def initialize(
@@ -165,6 +171,7 @@ class WorkflowRunner:
             work_branch=f"reforge/{run_id}",
             base_commit=git.current_commit(),
             budgets=budgets or self.default_budgets.model_copy(),
+            requires_approval=self.require_plan_approval,
         )
         state.best_commit = state.base_commit
         git.create_branch(state.work_branch)
@@ -178,14 +185,16 @@ class WorkflowRunner:
         workspace = Path(state.workspace_path)
         if not workspace.is_dir():
             raise WorkflowError(f"workspace does not exist: {workspace}")
-        if not state.agent_runtime and self.executors is not None:
+        if self.executors is not None and (not state.agent_runtime or state.stage is not Stage.INIT):
+            # Fresh start, or resuming after a human decision: (re)attach ADK sessions.
             self._bind_agent_sessions(state)
         if state.stage is Stage.INIT:
             self._transition(state, TransitionSignal.INITIALIZED, "Workspace is ready for analysis.")
         guards: MutationGuards | None = None
 
         try:
-            while state.stage not in {Stage.REPORT, Stage.DONE}:
+            # AWAIT_APPROVAL ends this worker; the API resumes the run after a decision.
+            while state.stage not in {Stage.REPORT, Stage.DONE, Stage.AWAIT_APPROVAL}:
                 self._check_budget(state, started)
                 if state.stage is Stage.ANALYZE:
                     self._record(state, "analysis", "tool_call", "Collecting deterministic repository evidence.")
@@ -206,14 +215,24 @@ class WorkflowRunner:
                     self._transition(state, TransitionSignal.ANALYSIS_VALID, "Analysis report validated.")
                 elif state.stage is Stage.PLAN:
                     assert state.analysis is not None
+                    feedback = self._pending_feedback(state)
+                    previous_plan = state.plan
+                    files = RepositoryTools(workspace).list_tree()
                     state.plan = self._agent_call(
                         state,
                         "planning",
-                        lambda: self.planning_agent.run(
-                            state.objective, state.analysis, RepositoryTools(workspace).list_tree()
+                        lambda: (
+                            self.planning_agent.run(
+                                state.objective, state.analysis, files,
+                                reviewer_feedback=feedback, previous_plan=previous_plan,
+                            )
+                            if feedback
+                            else self.planning_agent.run(state.objective, state.analysis, files)
                         ),
                     )
                     validate_plan(state.plan)
+                    if previous_plan is not None and state.plan.version <= previous_plan.version:
+                        state.plan.version = previous_plan.version + 1
                     self._transition(state, TransitionSignal.PLAN_VALID, "Modernization plan validated.")
                 elif state.stage is Stage.BASELINE:
                     self._establish_baseline(state, workspace)
@@ -258,7 +277,11 @@ class WorkflowRunner:
                 elif state.stage is Stage.REPLAN:
                     self._replan(state, workspace)
                     guards = self._make_guards(state)
-                    self._transition(state, TransitionSignal.REPLAN_VALID, "Replacement plan validated; restored best checkpoint.")
+                    if state.requires_approval:
+                        # A replacement plan is a new proposal: a person approves it too.
+                        self._request_approval(state, "Replacement plan validated; restored best checkpoint.")
+                    else:
+                        self._transition(state, TransitionSignal.REPLAN_VALID, "Replacement plan validated; restored best checkpoint.")
                 else:  # pragma: no cover - all nonterminal states are handled above.
                     raise WorkflowError(f"unsupported workflow stage: {state.stage}")
         except Exception as exc:
@@ -302,7 +325,7 @@ class WorkflowRunner:
             )
             self._route_test_failure(state)
         elif self._has_unapplied_plan_steps(state):
-            unapplied = [step.id for step in state.plan.steps if step.status != "applied"] if state.plan else []
+            unapplied = [step.id for step in state.plan.steps if step.status not in {"applied", "declined"}] if state.plan else []
             self._report_partial(
                 state,
                 "Applied steps preserved every frozen baseline test, but some planned modernization steps were not "
@@ -410,6 +433,11 @@ class WorkflowRunner:
 
     def _establish_baseline(self, state: ProjectState, workspace: Path) -> None:
         """Freeze existing behavior, supplementing it only with passing generated tests."""
+        if state.baseline is not None and state.baseline_pass_set:
+            # Revised plan after reviewer feedback: the code is unchanged, so
+            # the recorded baseline still holds and goes straight back to review.
+            self._request_approval(state, "Revised plan validated; the recorded baseline still applies.")
+            return
         report = self._run_tests(state, workspace, "baseline")
         state.test_runs.append(report)
         if report.install_ok and (
@@ -494,12 +522,17 @@ class WorkflowRunner:
         if generated_files:
             git.commit("Baseline characterization tests", generated_files)
         state.best_commit = git.current_commit()
-        self._transition(state, TransitionSignal.BASELINE_USABLE, "Baseline pass set frozen and checkpointed.")
+        if state.requires_approval:
+            self._request_approval(state, "Baseline pass set frozen and checkpointed.")
+        else:
+            self._transition(state, TransitionSignal.BASELINE_USABLE, "Baseline pass set frozen and checkpointed.")
 
     def _apply_plan(self, state: ProjectState, workspace: Path, guards: MutationGuards) -> None:
         assert state.plan is not None
         codemods = self.codemod_factory(workspace) if self.enable_codemods and self.codemod_factory else None
         for step in self._ordered_steps(state.plan):
+            if step.status == "declined":
+                continue  # the reviewer chose not to apply this step
             blocked_by = [
                 dependency
                 for dependency in step.depends_on
@@ -785,7 +818,87 @@ class WorkflowRunner:
 
     @staticmethod
     def _has_unapplied_plan_steps(state: ProjectState) -> bool:
-        return bool(state.plan and any(step.status != "applied" for step in state.plan.steps))
+        """Approved steps that did not apply; steps a reviewer declined do not count."""
+        return bool(state.plan and any(step.status not in {"applied", "declined"} for step in state.plan.steps))
+
+    def _request_approval(self, state: ProjectState, summary: str) -> None:
+        """Pause the run: the plan is proposed to a person and nothing is changed until they decide."""
+        signal_stage = state.stage
+        self._transition(state, TransitionSignal.APPROVAL_REQUIRED, summary)
+        plan = state.plan
+        self._record(
+            state, "orchestrator", "decision",
+            f"Plan v{plan.version if plan else '?'} proposed; waiting for a person to approve, revise, or reject it.",
+            {
+                "plan_version": plan.version if plan else None,
+                "steps": [step.id for step in plan.steps] if plan else [],
+                "from": signal_stage.value,
+            },
+        )
+
+    @staticmethod
+    def _pending_feedback(state: ProjectState) -> str | None:
+        """Reviewer feedback for the plan being revised, if the last decision asked for changes."""
+        if state.reviews and state.reviews[-1].decision == "revision_requested":
+            return state.reviews[-1].feedback
+        return None
+
+    @staticmethod
+    def apply_review(
+        state: ProjectState,
+        decision: str,
+        *,
+        approved_steps: list[str] | None = None,
+        feedback: str = "",
+    ) -> ProjectState:
+        """Record a human decision on the proposed plan and move the run to its next stage.
+
+        ``approved`` may approve a subset of steps; the rest, and any step that
+        depends on a declined step, are marked ``declined``.  ``revision_requested``
+        sends the reviewer's feedback back to the planner.  ``rejected`` ends
+        the run with no code changed.
+        """
+        if state.stage is not Stage.AWAIT_APPROVAL or state.plan is None:
+            raise ValueError("this run is not waiting for plan approval")
+        plan = state.plan
+        known = {step.id for step in plan.steps}
+        review_args: dict[str, object] = {"ts": datetime.now(timezone.utc), "plan_version": plan.version, "feedback": feedback.strip()}
+        if decision == "approved":
+            selected = set(approved_steps if approved_steps is not None else known)
+            unknown = selected - known
+            if unknown:
+                raise ValueError(f"unknown plan steps: {sorted(unknown)}")
+            declined = known - selected
+            changed = True
+            while changed:  # a step whose prerequisite is declined cannot run either
+                changed = False
+                for step in plan.steps:
+                    if step.id not in declined and declined.intersection(step.depends_on):
+                        declined.add(step.id)
+                        changed = True
+            if declined == known:
+                raise ValueError("approve at least one step, or reject the plan")
+            for step in plan.steps:
+                if step.id in declined:
+                    step.status = "declined"
+            approved = sorted(known - declined)
+            state.reviews.append(PlanReview(decision="approved", approved_steps=approved, declined_steps=sorted(declined), **review_args))
+            Orchestrator.transition(state, TransitionSignal.PLAN_APPROVED)
+            summary = f"Plan v{plan.version} approved ({len(approved)} of {len(known)} steps)."
+        elif decision == "revision_requested":
+            if not feedback.strip():
+                raise ValueError("describe the changes you want so the planner can revise the plan")
+            state.reviews.append(PlanReview(decision="revision_requested", **review_args))
+            Orchestrator.transition(state, TransitionSignal.REVISION_REQUESTED)
+            summary = f"Changes requested to plan v{plan.version}: {feedback.strip()[:200]}"
+        elif decision == "rejected":
+            state.reviews.append(PlanReview(decision="rejected", **review_args))
+            Orchestrator.transition(state, TransitionSignal.PLAN_REJECTED)
+            summary = f"Plan v{plan.version} rejected; no code was changed."
+        else:
+            raise ValueError(f"unknown review decision: {decision}")
+        TraceRecorder.add(state, agent="reviewer", kind="decision", summary=summary, data={"decision": decision})
+        return state
 
     def _check_budget(self, state: ProjectState, started: float) -> None:
         if self.cancel_checker is not None and self.cancel_checker(state.run_id):

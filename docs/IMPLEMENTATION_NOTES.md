@@ -296,6 +296,30 @@ To run the unit suite: `python -m pip install -e ".[dev]"`, then `python -m pyte
 
 **Clean-up on hosts that ran the old build:** `sudo rm -rf /app/runs`, plus `sudo rmdir /app` if it is now empty. Both were created by Docker, not by you.
 
+### Human approval before any change (`REQUIRE_PLAN_APPROVAL=true`, the default)
+
+After planning and recording the baseline, a run stops at the new `AWAIT_APPROVAL` stage, and its worker thread exits. Nothing in the repository has changed at that point. The reviewer decides in the dashboard, or through `POST /runs/{id}/review`, with one of three outcomes:
+
+- **`approved`**, optionally with `approved_steps`. Steps left out are marked `declined`, and so is any step that depends on one of them. The run resumes and applies only the approved steps. Declined steps do not make a run PARTIAL.
+- **`revision_requested`**, with feedback. The planner receives the feedback and the previous plan, produces a new version, and the run waits for approval again. The baseline is reused, not re-run.
+- **`rejected`**. The run ends ABORTED with a report, and no code is changed.
+
+A replacement plan produced by the repair loop (REPLAN) also requires approval. Every decision is stored in `ProjectState.reviews`. Paused runs survive a backend restart, and benchmark suites always run unattended.
+
+### Reliable file edits (fixes "patch does not apply")
+
+Agents used to write unified diffs, and models often get line counts or context wrong, which made `git apply` reject the change. Transformation and repair agents now return **search/replace edits** (`FileEdit`):
+
+- ReForge requires each `search` snippet to appear exactly once in the current file. If it doesn't, the error names the closest matching line so the agent's retry can correct it.
+- ReForge computes the new file contents itself and derives the unified diff, which goes through the same mutation guards.
+- Files are written with their original line endings, CRLF included.
+
+Unified-diff patches remain accepted as a fallback.
+
+### Dependency-rollback guard
+
+The guard now treats a patch as a rollback only if it removes a *different* constraint for a dependency and adds back its original one. Moving or copying a declaration at its unchanged version (consolidating manifests, moving a package to devDependencies) is allowed.
+
 ### Repositories without tests
 
 After the mount fix, CharitEase installed successfully (`added 106 packages`) but still failed. Its only test script is npm's placeholder, so there was no baseline to protect changes. ReForge now handles these repositories in two steps.

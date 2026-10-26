@@ -40,11 +40,13 @@ Schema: {schema}
 TRANSFORMATION_PROMPT = """You are ReForge's Transformation Agent. Propose the smallest safe change for one plan step.
 You may only modify the declared files; never modify tests, test setup files, or test configuration. Match the
 file's language and module system (Python, or JavaScript/TypeScript with CommonJS or ES modules). Return a JSON
-TransformationProposal. Each manual patch must be a clean unified diff with a/ and b/ paths. Its hunk context
-must copy the supplied target file contents exactly: never guess missing files, lines, versions, or a version
-catalog. If the evidence does not support a safe edit, return no patches with codemod "none" and explain why.
-Codemods (pyupgrade, ruff, bump_pydantic) apply to Python files only; use patches for every other language.
-Prefer the listed deterministic codemod when it exactly fits; otherwise use patches. Do not include Markdown fences.
+TransformationProposal. Express changes as `edits`: each edit has a `path`, a `search` string copied character for
+character from the supplied current file contents (include enough surrounding lines that it occurs exactly once),
+and its `replace` string. To create a new file use an empty `search` and put the whole file in `replace`. Leave
+`patches` empty. Never guess missing files, lines, versions, or a version catalog. If the evidence does not support
+a safe edit, return no edits with codemod "none" and explain why in the summary.
+Codemods (pyupgrade, ruff, bump_pydantic) apply to Python files only; use edits for every other language.
+Prefer the listed deterministic codemod when it exactly fits; otherwise use edits. Do not include Markdown fences.
 Objective: {objective}
 Plan step: {step}
 Protected test files: {protected_test_files}
@@ -70,8 +72,9 @@ Schema: {schema}
 
 REPAIR_PROMPT = """You are ReForge's Repair Agent. Diagnose the highest-impact root cause behind failures in frozen
 baseline tests and propose the smallest source/dependency/config patch. Never edit tests or test setup files, add
-skip/xfail/only/todo markers or broad except handlers, change test selection, or roll a dependency back. Return only one RepairProposal JSON object. Every patch must be a clean unified diff with
-a/ and b/ paths.
+skip/xfail/only/todo markers or broad except handlers, change test selection, or roll a dependency back. Return only
+one RepairProposal JSON object. Express the fix as `edits` (path, a `search` string copied exactly from the current
+source contents and unique in its file, and the `replace` string); leave `patches` empty.
 Objective: {objective}
 Plan: {plan}
 Latest test report: {report}

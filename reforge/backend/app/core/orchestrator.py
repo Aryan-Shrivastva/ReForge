@@ -25,6 +25,11 @@ class TransitionSignal(str, Enum):
     REPAIR_APPLIED = "repair_applied"
     REPAIR_NO_PROGRESS = "repair_no_progress"
     REPLAN_VALID = "replan_valid"
+    # Human-in-the-loop plan review.
+    APPROVAL_REQUIRED = "approval_required"
+    PLAN_APPROVED = "plan_approved"
+    REVISION_REQUESTED = "revision_requested"
+    PLAN_REJECTED = "plan_rejected"
     BUDGET_EXCEEDED = "budget_exceeded"
     CANCELLED = "cancelled"
     REPORT_WRITTEN = "report_written"
@@ -62,6 +67,12 @@ class Orchestrator:
         (Stage.REPAIR, TransitionSignal.REPAIR_APPLIED): Transition(Stage.TEST),
         (Stage.REPAIR, TransitionSignal.REPAIR_NO_PROGRESS): Transition(Stage.REPLAN),
         (Stage.REPLAN, TransitionSignal.REPLAN_VALID): Transition(Stage.TRANSFORM),
+        # A proposed plan (initial or replacement) waits for a person before any change.
+        (Stage.BASELINE, TransitionSignal.APPROVAL_REQUIRED): Transition(Stage.AWAIT_APPROVAL),
+        (Stage.REPLAN, TransitionSignal.APPROVAL_REQUIRED): Transition(Stage.AWAIT_APPROVAL),
+        (Stage.AWAIT_APPROVAL, TransitionSignal.PLAN_APPROVED): Transition(Stage.TRANSFORM),
+        (Stage.AWAIT_APPROVAL, TransitionSignal.REVISION_REQUESTED): Transition(Stage.PLAN),
+        (Stage.AWAIT_APPROVAL, TransitionSignal.PLAN_REJECTED): Transition(Stage.REPORT, FinalStatus.ABORTED),
         (Stage.REPORT, TransitionSignal.REPORT_WRITTEN): Transition(Stage.DONE),
     }
 

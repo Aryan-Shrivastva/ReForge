@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -20,6 +20,8 @@ class Stage(str, Enum):
     ANALYZE = "ANALYZE"
     PLAN = "PLAN"
     BASELINE = "BASELINE"
+    # Paused until a person approves, revises, or rejects the proposed plan.
+    AWAIT_APPROVAL = "AWAIT_APPROVAL"
     TRANSFORM = "TRANSFORM"
     TEST = "TEST"
     REPAIR = "REPAIR"
@@ -81,7 +83,8 @@ class PlanStep(StrictModel):
     depends_on: list[str] = Field(default_factory=list)
     kind: Literal["dependency", "config", "api_replacement", "refactor", "other"]
     validation_hint: str
-    status: Literal["pending", "applied", "failed", "skipped"] = "pending"
+    # "declined": a reviewer chose not to apply this step (not a failure).
+    status: Literal["pending", "applied", "failed", "skipped", "declined"] = "pending"
     commit_sha: str | None = None
 
 
@@ -119,10 +122,25 @@ class TestGenerationProposal(StrictModel):
     files: list[GeneratedTestFile] = Field(min_length=1)
 
 
+class FileEdit(StrictModel):
+    """One exact search/replace edit; far more reliable for LLMs than hand-written diffs.
+
+    ``search`` must occur exactly once in the current file and is replaced by
+    ``replace``.  An empty ``search`` creates a new file whose content is
+    ``replace``.  ReForge applies edits itself and derives the unified diff
+    that the mutation guards validate.
+    """
+
+    path: str = Field(min_length=1)
+    search: str
+    replace: str
+
+
 class TransformationProposal(StrictModel):
     """Schema returned by the Transformation Agent before deterministic application."""
 
     summary: str = Field(min_length=1)
+    edits: list[FileEdit] = Field(default_factory=list)
     patches: list[PatchProposal] = Field(default_factory=list)
     codemod: Literal["none", "pyupgrade", "ruff", "bump_pydantic"] = "none"
 
@@ -179,7 +197,14 @@ class RepairProposal(StrictModel):
     root_cause_category: Literal[
         "dependency", "api_change", "config", "logic", "test_env", "unknown"
     ]
-    patches: list[PatchProposal] = Field(min_length=1)
+    edits: list[FileEdit] = Field(default_factory=list)
+    patches: list[PatchProposal] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def proposes_a_change(self) -> "RepairProposal":
+        if not self.edits and not self.patches:
+            raise ValueError("a repair must contain at least one edit or patch")
+        return self
 
 
 class Budgets(StrictModel):
@@ -198,6 +223,17 @@ class Metrics(StrictModel):
     files_changed: int = Field(default=0, ge=0)
     lines_added: int = Field(default=0, ge=0)
     lines_removed: int = Field(default=0, ge=0)
+
+
+class PlanReview(StrictModel):
+    """One human decision on a proposed plan."""
+
+    ts: datetime
+    plan_version: int = Field(ge=1)
+    decision: Literal["approved", "revision_requested", "rejected"]
+    approved_steps: list[str] = Field(default_factory=list)
+    declined_steps: list[str] = Field(default_factory=list)
+    feedback: str = ""
 
 
 class TraceEvent(StrictModel):
@@ -230,6 +266,9 @@ class ProjectState(StrictModel):
     # True when the repository had no runnable tests and the baseline is
     # per-file syntax checks only (behavior is then not verified).
     smoke_baseline: bool = False
+    # Human-in-the-loop: every plan must be approved before code changes.
+    requires_approval: bool = False
+    reviews: list[PlanReview] = Field(default_factory=list)
     test_runs: list[TestReport] = Field(default_factory=list)
     repairs: list[RepairAttempt] = Field(default_factory=list)
     replans: int = Field(default=0, ge=0)

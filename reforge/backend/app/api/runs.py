@@ -72,6 +72,17 @@ class RunCreated(BaseModel):
     run_id: str
 
 
+class PlanReviewRequest(BaseModel):
+    """A person's decision on a paused run's proposed plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approved", "revision_requested", "rejected"]
+    # For "approved": the step ids to apply; omitted means every step.
+    approved_steps: list[str] | None = None
+    feedback: str = Field(default="", max_length=4_000)
+
+
 class BenchmarkRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -119,7 +130,8 @@ class RunService:
         for state in self.store.list():
             with self._lock:
                 alive = state.run_id in self._threads and self._threads[state.run_id].is_alive()
-            if state.final_status is not None or alive:
+            # A run paused for plan approval is waiting for a person, not interrupted.
+            if state.final_status is not None or alive or state.stage is Stage.AWAIT_APPROVAL:
                 continue
             cancelled = (self.runs_root / state.run_id / CANCEL_MARKER).is_file()
             state.stage = Stage.REPORT
@@ -322,6 +334,65 @@ class RunService:
         finally:
             if acquired:
                 self._slots.release()
+
+    def review(
+        self,
+        run_id: str,
+        decision: str,
+        *,
+        approved_steps: list[str] | None = None,
+        feedback: str = "",
+    ) -> ProjectState:
+        """Apply a person's decision on a paused run's plan, then resume the run."""
+        with self._lock:
+            thread = self._threads.get(run_id)
+            if thread is not None and thread.is_alive():
+                raise RuntimeError("the run is still working; review the plan once it asks for approval")
+            try:
+                state = self.store.load(run_id)
+            except FileNotFoundError as exc:
+                raise KeyError(run_id) from exc
+            if state.stage is not Stage.AWAIT_APPROVAL or state.final_status is not None:
+                raise RuntimeError("this run is not waiting for plan approval")
+            WorkflowRunner.apply_review(state, decision, approved_steps=approved_steps, feedback=feedback)
+            self.store.save(state)
+            worker = threading.Thread(target=self._continue, args=(run_id,), name=f"reforge-resume-{run_id[:8]}", daemon=True)
+            self._cancellations.setdefault(run_id, threading.Event())
+            self._threads[run_id] = worker
+        worker.start()
+        return state
+
+    def _continue(self, run_id: str) -> None:
+        """Resume a run after a human decision (apply the plan, revise it, or write the report)."""
+        acquired = False
+        try:
+            if not self._slots.acquire(blocking=False):
+                self._note(run_id, "Waiting for a free run slot (MAX_CONCURRENT_RUNS reached).")
+                while not self._slots.acquire(timeout=1.0):
+                    if self.cancelled(run_id):
+                        self._finalize(run_id, FinalStatus.ABORTED, "Run cancelled while waiting for a run slot.")
+                        return
+            acquired = True
+            state = self.store.load(run_id)
+            runner = self.workflow_factory(self.settings.with_overrides(state.config_overrides), self.runs_root)
+            runner.cancel_checker = self.cancelled
+            runner.run(state)
+        except Exception as exc:
+            self._finalize(run_id, FinalStatus.FAILED, f"Resuming the run failed: {type(exc).__name__}: {exc}")
+        finally:
+            if acquired:
+                self._slots.release()
+
+    def _finalize(self, run_id: str, status: FinalStatus, summary: str) -> None:
+        try:
+            state = self.store.load(run_id)
+        except (FileNotFoundError, ValueError):
+            return
+        if state.final_status is None:
+            state.stage = Stage.REPORT
+            state.final_status = status
+            TraceRecorder.add(state, agent="api", kind="error" if status is FinalStatus.FAILED else "decision", summary=summary)
+            self.store.save(state)
 
     def _note(self, run_id: str, summary: str) -> None:
         try:
@@ -595,6 +666,20 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/runs/{run_id}/review", response_model=ProjectState)
+    def review_plan(run_id: str, payload: PlanReviewRequest) -> ProjectState:
+        """Approve (all or some steps), request changes to, or reject a run's proposed plan."""
+        try:
+            return service.review(
+                run_id, payload.decision, approved_steps=payload.approved_steps, feedback=payload.feedback
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/runs/{run_id}/rerun", response_model=RunCreated, status_code=status.HTTP_202_ACCEPTED)
     def rerun(run_id: str) -> RunCreated:

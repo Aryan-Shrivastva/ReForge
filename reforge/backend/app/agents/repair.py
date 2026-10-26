@@ -10,6 +10,7 @@ from ..core.guards import GuardViolation, MutationGuards, changed_paths
 from ..core.state import Plan, RepairAttempt, RepairProposal, TestReport
 from ..llm import LLMClient
 from ..tools.git_tools import GitTools
+from ..tools.edits import plan_edits, write_edits
 from ..tools.repo_tools import RepositoryTools, normalise_unified_diff_hunks
 from .base import StructuredAgent
 from .executor import AgentExecutor
@@ -73,12 +74,18 @@ class RepairAgent(StructuredAgent):
 
         for patch_attempt in range(2):
             proposal = self._complete_proposal(f"{prompt}{retry_note}")
-            unified_diff = normalise_unified_diff_hunks(
-                "\n".join(patch.unified_diff.rstrip() for patch in proposal.patches) + "\n"
-            )
             try:
-                paths = sorted(guards.validate_repair_patch(unified_diff))
-                repository.apply_patch(unified_diff)
+                if proposal.edits:
+                    # Preferred: exact search/replace edits, validated via their derived diff.
+                    edit_plan = plan_edits(repository, proposal.edits)
+                    paths = sorted(guards.validate_repair_patch(edit_plan.diff))
+                    write_edits(repository, edit_plan)
+                else:
+                    unified_diff = normalise_unified_diff_hunks(
+                        "\n".join(patch.unified_diff.rstrip() for patch in proposal.patches) + "\n"
+                    )
+                    paths = sorted(guards.validate_repair_patch(unified_diff))
+                    repository.apply_patch(unified_diff)
                 iteration = len(repairs) + 1
                 commit = git.commit(f"R{iteration}: {proposal.diagnosis}", paths)
                 return RepairAttempt(
@@ -98,8 +105,8 @@ class RepairAgent(StructuredAgent):
                 if patch_attempt == 1:
                     raise
                 retry_note = (
-                    "\n\nThe previous repair patch was rejected before any change was committed. "
-                    "Return a new complete unified diff using the current source contents above. "
+                    "\n\nThe previous repair was rejected before any change was committed. "
+                    "Return new edits whose search text is copied exactly from the current source contents above. "
                     f"Rejection: {exc}"
                 )
 

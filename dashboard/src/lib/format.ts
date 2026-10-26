@@ -1,6 +1,6 @@
 import type { FinalStatus, ProjectState } from "../types";
 
-export type RunStatus = FinalStatus | "RUNNING" | "QUEUED";
+export type RunStatus = FinalStatus | "RUNNING" | "QUEUED" | "AWAITING";
 
 /** Human name for a run: "owner/repo" for Git URLs, the archive name for uploads. */
 export function repoName(state: ProjectState): string {
@@ -20,6 +20,7 @@ export function isLegacyFalseSuccess(state: ProjectState): boolean {
 export function runStatus(state: ProjectState): RunStatus {
   if (isLegacyFalseSuccess(state)) return "PARTIAL";
   if (state.final_status) return state.final_status;
+  if (state.stage === "AWAIT_APPROVAL") return "AWAITING";
   return state.stage === "INIT" && state.trace.length <= 1 ? "QUEUED" : "RUNNING";
 }
 

@@ -11,6 +11,7 @@ from ..core.state import PlanStep, TransformationProposal, TransformationResult
 from ..llm import LLMClient
 from ..tools.codemod_tools import Codemod, CodemodTools
 from ..tools.git_tools import GitTools
+from ..tools.edits import plan_edits, write_edits
 from ..tools.repo_tools import RepositoryTools, normalise_unified_diff_hunks
 from .base import StructuredAgent
 from .executor import AgentExecutor
@@ -74,8 +75,9 @@ class TransformationAgent(StructuredAgent):
                         error=str(exc),
                     )
                 retry_note = (
-                    "\n\nThe previous patch was rejected by deterministic guards or could not apply. "
-                    f"Produce a corrected proposal. Error: {exc}"
+                    "\n\nThe previous proposal was rejected by deterministic guards or could not be applied. "
+                    "Produce corrected edits whose search text is copied exactly from the target file contents above. "
+                    f"Error: {exc}"
                 )
 
         raise AssertionError("two transformation attempts should always return")  # pragma: no cover
@@ -133,6 +135,13 @@ class TransformationAgent(StructuredAgent):
             if not diff:
                 return TransformationResult(step_id=step.id, status="skipped")
             files_changed = sorted(guards.validate_transformation_patch(diff, step.files))
+        elif proposal.edits:
+            # Preferred path: exact search/replace edits, validated through
+            # the same guards via the diff ReForge derives from them.
+            edit_plan = plan_edits(repository, proposal.edits)
+            files_changed = sorted(guards.validate_transformation_patch(edit_plan.diff, step.files))
+            write_edits(repository, edit_plan)
+            diff = edit_plan.diff
         elif proposal.patches:
             unified_diff = normalise_unified_diff_hunks(
                 "\n".join(patch.unified_diff.rstrip() for patch in proposal.patches) + "\n"

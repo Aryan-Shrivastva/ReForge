@@ -62,13 +62,29 @@ class PlanningAgent(StructuredAgent):
         if llm is not None:
             super().__init__(llm, max_retries=max_retries)
 
-    def run(self, objective: str, analysis: AnalysisReport, workspace_files: list[str]) -> Plan:
+    def run(
+        self,
+        objective: str,
+        analysis: AnalysisReport,
+        workspace_files: list[str],
+        *,
+        reviewer_feedback: str | None = None,
+        previous_plan: Plan | None = None,
+    ) -> Plan:
         prompt = PLANNING_PROMPT.format(
             objective=objective,
             analysis=json.dumps(analysis.model_dump(mode="json")),
             files=json.dumps(workspace_files),
             schema=json.dumps(Plan.model_json_schema()),
         )
+        if reviewer_feedback:
+            # A person reviewed the previous proposal and asked for changes.
+            previous = json.dumps(previous_plan.model_dump(mode="json")) if previous_plan else "none"
+            prompt += (
+                "\nA human reviewer rejected the previous proposal and asked for changes. Their feedback takes "
+                "priority over your own preferences; follow it unless it would require editing tests or weakening "
+                f"verification.\nReviewer feedback: {reviewer_feedback}\nPrevious proposal: {previous}\n"
+            )
         if self.executor is not None:
             return self.executor.run(
                 role="Repository modernization planner",

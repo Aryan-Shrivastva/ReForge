@@ -167,6 +167,8 @@ class BenchmarkRunner:
         workspace = self.runs_root / run_id / "workspace"
         self._materialize(benchmark.repository_path, workspace)
         runner = self.workflow_factory(self.runs_root)
+        # Benchmarks measure the unattended pipeline; there is no reviewer to wait for.
+        runner.require_plan_approval = False
         if ablation.enable_codemods is not None:
             runner.enable_codemods = ablation.enable_codemods
         budgets = (getattr(runner, "default_budgets", None) or Budgets()).model_copy(

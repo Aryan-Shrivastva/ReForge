@@ -9,6 +9,7 @@ const STATUS_TEXT: Record<RunStatus, string> = {
   ABORTED: "Cancelled",
   RUNNING: "Running",
   QUEUED: "Queued",
+  AWAITING: "Awaiting approval",
 };
 
 /** Deployment-style status: a coloured dot and a word. */
@@ -27,6 +28,7 @@ export function StepIcon({ status }: { status: StepStatus }) {
     done: <path d="M4.5 8.2 7 10.6l4.6-5.2" />,
     failed: <path d="m5.2 5.2 5.6 5.6m0-5.6-5.6 5.6" />,
     warning: <path d="M8 4.6v4.2m0 2.4v.2" />,
+    waiting: <path d="M6.5 5.4v5.2m3-5.2v5.2" />,
     pending: null,
     skipped: <path d="M5 8h6" />,
   };

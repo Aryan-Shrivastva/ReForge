@@ -67,6 +67,8 @@ class Settings:
     max_archive_uncompressed_bytes: int = 1024 * 1024 * 1024
     max_archive_members: int = 50_000
     max_concurrent_runs: int = 2
+    # Human-in-the-loop: pause every run for plan approval before changing code.
+    require_plan_approval: bool = True
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -126,6 +128,7 @@ class Settings:
             max_archive_uncompressed_bytes=_env_int("MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1024 * 1024 * 1024),
             max_archive_members=_env_int("MAX_ARCHIVE_MEMBERS", 50_000),
             max_concurrent_runs=_env_int("MAX_CONCURRENT_RUNS", 2),
+            require_plan_approval=_env_bool("REQUIRE_PLAN_APPROVAL", True),
         )
 
     def with_overrides(self, overrides: dict[str, Any]) -> "Settings":
@@ -162,6 +165,7 @@ _FIELD_TYPES: dict[str, tuple[Any, ...]] = {
     "max_archive_uncompressed_bytes": (int,),
     "max_archive_members": (int,),
     "max_concurrent_runs": (int,),
+    "require_plan_approval": (bool,),
 }
 
 

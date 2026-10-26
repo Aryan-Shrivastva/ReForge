@@ -49,6 +49,9 @@ export interface ProjectState {
   protected_test_files: string[];
   /** True when the repository had no runnable tests and the baseline is syntax checks only. */
   smoke_baseline?: boolean;
+  /** Human-in-the-loop: the run pauses for plan approval before changing code. */
+  requires_approval?: boolean;
+  reviews?: PlanReview[];
   test_runs: TestReport[];
   repairs: RepairAttempt[];
   replans: number;
@@ -101,7 +104,8 @@ export interface PlanStep {
   depends_on: string[];
   kind: string;
   validation_hint: string;
-  status: "pending" | "applied" | "failed" | "skipped";
+  /** "declined": a reviewer chose not to apply this step. */
+  status: "pending" | "applied" | "failed" | "skipped" | "declined";
   commit_sha: string | null;
 }
 
@@ -145,4 +149,13 @@ export interface EvaluationSummary {
     regressions_introduced: number;
     wall_clock_s: number;
   }>;
+}
+
+export interface PlanReview {
+  ts: string;
+  plan_version: number;
+  decision: "approved" | "revision_requested" | "rejected";
+  approved_steps: string[];
+  declined_steps: string[];
+  feedback: string;
 }

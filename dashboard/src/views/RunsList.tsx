@@ -23,7 +23,7 @@ const FILTERS: Array<[Filter, string]> = [
 function matches(filter: Filter, status: RunStatus): boolean {
   if (filter === "active") return status === "RUNNING" || status === "QUEUED";
   if (filter === "ready") return status === "SUCCESS";
-  if (filter === "attention") return status === "FAILED" || status === "PARTIAL" || status === "ABORTED";
+  if (filter === "attention") return status === "AWAITING" || status === "FAILED" || status === "PARTIAL" || status === "ABORTED";
   return true;
 }
 

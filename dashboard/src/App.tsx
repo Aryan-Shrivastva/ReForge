@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { ProjectState } from "./types";
 import { message, repoName } from "./lib/format";
+import type { ReviewDecision } from "./components/ApprovalPanel";
 import { NewRunDialog, type NewRunInput } from "./components/NewRunDialog";
 import { Benchmarks } from "./views/Benchmarks";
 import { RUN_TABS, RunPage, type RunTab } from "./views/RunPage";
@@ -167,6 +168,17 @@ export default function App() {
     }
   };
 
+  const reviewPlan = async (run: ProjectState, review: ReviewDecision): Promise<boolean> => {
+    try {
+      setSelected(await api.reviewPlan(run.run_id, review));
+      void refreshRuns();
+      return true;
+    } catch (caught) {
+      setError(`Could not submit your decision. ${message(caught)}`);
+      return false;
+    }
+  };
+
   const deleteRun = async (run: ProjectState) => {
     if (!run.final_status) return;
     if (!window.confirm(`Delete run ${run.run_id.slice(0, 7)} for ${repoName(run)}? Its report and run files will be permanently removed.`)) return;
@@ -236,6 +248,7 @@ export default function App() {
                 onCancel={() => void cancelRun()}
                 onDelete={() => void deleteRun(selected)}
                 onRerun={() => void rerun(selected)}
+                onReview={(review) => reviewPlan(selected, review)}
               />
             : <div className="container"><p className="muted">Loading run…</p></div>
         )}

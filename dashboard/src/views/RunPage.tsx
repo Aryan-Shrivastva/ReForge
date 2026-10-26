@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { ProjectState, TestReport } from "../types";
 import { compactNumber, duration, relativeTime, repoName, runDuration, runStatus, startedAt, titleCase } from "../lib/format";
 import { buildSteps, explain, languageName, type Step, type StepKey } from "../lib/steps";
+import { ApprovalPanel, type ReviewDecision } from "../components/ApprovalPanel";
 import { Chip, Meta, Status, StepIcon } from "../components/ui";
 import { Changes } from "./Changes";
 import { Logs } from "./Logs";
@@ -16,13 +17,14 @@ export const RUN_TABS = [
 ] as const;
 export type RunTab = (typeof RUN_TABS)[number][0];
 
-export function RunPage({ state, tab, onTab, onCancel, onDelete, onRerun }: {
+export function RunPage({ state, tab, onTab, onCancel, onDelete, onRerun, onReview }: {
   state: ProjectState;
   tab: RunTab;
   onTab: (tab: RunTab) => void;
   onCancel: () => void;
   onDelete: () => void;
   onRerun: () => void;
+  onReview: (review: ReviewDecision) => Promise<boolean>;
 }) {
   const status = runStatus(state);
   return (
@@ -56,7 +58,7 @@ export function RunPage({ state, tab, onTab, onCancel, onDelete, onRerun }: {
         ))}
       </nav>
 
-      {tab === "overview" && <Overview state={state} onTab={onTab} />}
+      {tab === "overview" && <Overview state={state} onTab={onTab} onReview={onReview} />}
       {tab === "changes" && <Changes state={state} />}
       {tab === "logs" && <Logs state={state} />}
       {tab === "report" && <Report state={state} />}
@@ -64,7 +66,7 @@ export function RunPage({ state, tab, onTab, onCancel, onDelete, onRerun }: {
   );
 }
 
-function Overview({ state, onTab }: { state: ProjectState; onTab: (tab: RunTab) => void }) {
+function Overview({ state, onTab, onReview }: { state: ProjectState; onTab: (tab: RunTab) => void; onReview: (review: ReviewDecision) => Promise<boolean> }) {
   const status = runStatus(state);
   const explanation = explain(state);
   const steps = buildSteps(state);
@@ -85,6 +87,8 @@ function Overview({ state, onTab }: { state: ProjectState; onTab: (tab: RunTab) 
           <ul className="next-steps">{explanation.nextSteps.map((item) => <li key={item}>{item}</li>)}</ul>
         )}
       </section>
+
+      {status === "AWAITING" && <ApprovalPanel key={`${state.run_id}-${state.plan?.version}`} state={state} onReview={onReview} />}
 
       <section aria-label="Steps">
         <h2 className="steps-title">Steps</h2>
