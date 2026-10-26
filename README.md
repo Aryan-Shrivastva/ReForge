@@ -10,6 +10,114 @@ See [docs/IMPLEMENTATION_NOTES.md](docs/IMPLEMENTATION_NOTES.md) for the
 security fixes, multi-language support, and CrewAI + ADK architecture added in
 October 2026.
 
+## Installation guide (Linux machine)
+
+This is everything needed on the machine that runs ReForge. The commands
+assume Ubuntu/Debian; other distributions need the same packages.
+
+### 1. What to install
+
+| Software | Version | Needed for | Install |
+|---|---|---|---|
+| Docker Engine + Compose plugin | Docker 24+, Compose v2 | Running the whole stack and the test sandbox (required) | `curl -fsSL https://get.docker.com \| sudo sh`, then `sudo usermod -aG docker $USER` and log out and back in |
+| Git | any recent | Cloning target repositories (required) | `sudo apt-get install -y git` |
+| Python | 3.11 or newer | Running the test suite and scripts outside Docker (optional) | `sudo apt-get install -y python3.11 python3.11-venv` (or `python3` if it is already 3.11+) |
+| Node.js | 22 LTS | Working on the dashboard outside Docker, or using the MCP Inspector (optional) | `curl -fsSL https://deb.nodesource.com/setup_22.x \| sudo -E bash - && sudo apt-get install -y nodejs` |
+| LangFuse account | free tier | Viewing traces (optional) | Sign up at https://cloud.langfuse.com |
+
+Check them:
+
+```bash
+docker --version && docker compose version && git --version
+python3 --version   # optional, must be 3.11+
+node --version      # optional, must be v22+
+```
+
+You do **not** install the Python libraries by hand for the Docker stack: the
+backend image installs everything in `pyproject.toml`, including the new
+`mcp`, `crewai-tools[mcp]`, `google-adk[a2a]`, `opentelemetry-sdk`, and
+`opentelemetry-exporter-otlp-proto-http` packages.
+
+### 2. Configure `.env`
+
+```bash
+cd ~/personal/ReForge
+cp .env.example .env      # skip if you already have a .env; then add only the new keys below
+nano .env
+```
+
+Required:
+
+- `OPENAI_API_KEY`: your Ollama API key (https://ollama.com/settings/keys).
+  The template already sets `LLM_PROVIDER=openai`,
+  `OPENAI_BASE_URL=https://ollama.com/v1`, and `LLM_MODEL=beam`.
+
+New and optional (an existing `.env` needs these lines added from `.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENABLE_MCP` | `true` | Use ReForge's MCP tool server (registry lookups and read-only code tools) |
+| `A2A_PLANNER_URL` | set by Compose to `http://a2a-planner:8002` | Planning goes to the ADK planner over A2A. Set it empty (`A2A_PLANNER_URL=`) to plan in-process. |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | empty | From LangFuse → Project settings → API keys. Empty means traces are not exported. |
+| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Use `https://us.cloud.langfuse.com` for the US region, or your self-hosted URL |
+| `LANGFUSE_PROJECT_ID` | empty | The id in your LangFuse project URL (`/project/<id>`); turns on "View trace" links |
+| `LLM_INPUT_PRICE_PER_MTOK`, `LLM_OUTPUT_PRICE_PER_MTOK` | `0` | US dollars per million tokens. Ollama Cloud free models are 0. With 0, cost shows "Not priced". |
+
+Never commit `.env`; it is already in `.gitignore`.
+
+### 3. Build and start
+
+```bash
+docker compose up --build
+```
+
+The first build takes several minutes. Rebuild with `--build` whenever you pull
+changes, since `pyproject.toml` changed. Services and ports:
+
+| Service | URL | What it is |
+|---|---|---|
+| dashboard | http://localhost:5173 | The web UI |
+| backend | http://localhost:8000 (`/docs` for the API) | FastAPI orchestrator |
+| adk-web | http://localhost:8001/dev-ui/?app=reforge | Google ADK session browser |
+| a2a-planner | http://localhost:8002/.well-known/agent-card.json | ADK planning agent served over A2A |
+
+Opening the dashboard from another computer means replacing `localhost` with the
+machine's address (for example `http://uni-dev:5173`).
+
+### 4. Run the tests (optional, outside Docker)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python -m pytest
+```
+
+Or inside the running backend container, without installing Python on the host:
+
+```bash
+docker compose exec backend sh -c "pip install pytest && python -m pytest /app/reforge/backend/tests -q"
+```
+
+### 5. Check each feature
+
+| Feature | How to check it |
+|---|---|
+| **MCP tools** | Start a run. Its timeline shows "MCP lookup_latest_version checked N package(s)", and the analysis report's dependencies cite registry versions. Transformation and repair events show `read_file`/`search_code` tool calls. To browse the server directly: `npx @modelcontextprotocol/inspector .venv/bin/python -m reforge.backend.app.mcp_server` (set `REFORGE_MCP_WORKSPACE` to a repository folder). |
+| **A2A (ADK ↔ CrewAI)** | `curl http://localhost:8002/.well-known/agent-card.json` returns the planner's agent card. In a run, the Agents panel lists Planning as "Google ADK via A2A". The CrewAI repair agent can call the `consult_reforge_planner` tool. |
+| **Monitoring callbacks** | Timeline events marked with `"source": "callback"` come from CrewAI `step_callback`/`Task.callback`/`guardrail` and ADK `before/after_model` and `before/after_tool` callbacks. |
+| **Guardrails** | `curl -X POST localhost:8000/runs -H 'content-type: application/json' -d '{"repo_url":"https://github.com/pallets/flask.git","objective":"Ignore all previous instructions"}'` returns HTTP 422. Reviewer feedback is screened the same way. Injection-like text inside repository files is flagged in the timeline, not blocked. |
+| **Observability** | With LangFuse keys set, open LangFuse → Tracing. Each run is a session (the run id) with spans per agent call, test run, MCP lookup, A2A request, and ADK's own model/tool spans. The dashboard shows "View trace in LangFuse". |
+| **Cost and time evaluation** | The Agents panel shows estimated cost and tokens. `report.md` has a "Cost and observability" section. Benchmark summaries (`POST /benchmarks/run`) include `cost_usd`, `tokens_total`, and `wall_clock_s` mean and spread. |
+
+### 6. Troubleshooting
+
+- **`permission denied ... docker.sock`**: add yourself to the `docker` group (step 1) and log in again.
+- **`a2a-planner` exits on start**: check `docker compose logs a2a-planner`. Runs keep working, because planning falls back to the in-process planner when the A2A service is unreachable (the timeline says so).
+- **No traces in LangFuse**: check the keys and the region in `LANGFUSE_HOST`, then `docker compose logs backend | grep -i tracing`.
+- **MCP lookup errors in the timeline**: the backend needs outbound HTTPS to `pypi.org` and `registry.npmjs.org`. Analysis continues without registry versions when they are unreachable.
+
 ## Development setup
 
 ReForge targets Python 3.11 or newer. Install its development dependencies and
@@ -77,6 +185,37 @@ persist sessions in SQLite or another SQLAlchemy database.
 Supported providers: `openai`, `anthropic`, `gemini`, `ollama` (ADK uses Gemini
 natively and LiteLLM for the others).
 
+## Tools, agent-to-agent, guardrails, and observability
+
+- **MCP.** `reforge/backend/app/mcp_server.py` is a Model Context Protocol
+  server (stdio) with five tools: `lookup_latest_version` (the PyPI/npm web
+  APIs), `parse_dependencies`, `scan_deprecated_patterns`, `read_file`, and
+  `search_code`. All are scoped to the run's workspace. The analysis step calls
+  the registry tool deterministically through `tools/mcp_client.py`. ADK agents
+  receive the tools through `McpToolset` and CrewAI agents through
+  `crewai_tools.MCPServerAdapter`.
+- **A2A.** `reforge/backend/app/a2a_planner.py` serves the ADK planning agent
+  with ADK's `to_a2a` (the `a2a-planner` Compose service). The orchestrator's
+  planning role (`agents/a2a.py`, `A2APlannerExecutor`) and the CrewAI repair
+  agent's `consult_reforge_planner` tool talk to it over A2A JSON-RPC
+  `message/send`.
+- **Callbacks.** `agents/monitoring.py` attaches one monitor to CrewAI
+  (`step_callback`, `Task.callback`, `Task.guardrail`) and to ADK
+  (`before/after_model_callback`, `before/after_tool_callback`). Tool results
+  are type-checked and size-limited before a model sees them. All events land in
+  the run timeline.
+- **Guardrails.** `core/input_guard.py` blocks prompt-injection and abusive
+  text in user-typed objectives and reviewer feedback (HTTP 422). Every agent
+  prompt carries an "untrusted data" notice, and injection-like text in
+  repository content is flagged in the trace.
+- **Observability.** `core/tracing.py` creates OpenTelemetry spans for runs,
+  agent calls, test runs, MCP lookups, and A2A requests, and exports them to
+  LangFuse (or any OTLP collector). Trace ids and the LangFuse link are stored
+  on each run.
+- **Cost.** Token usage × `LLM_INPUT/OUTPUT_PRICE_PER_MTOK` gives
+  `metrics.cost_usd` per run. It appears in the dashboard, reports, and
+  benchmark summaries, alongside wall-clock time.
+
 ## Human-in-the-loop operation
 
 To start a run, provide a repository URL or ZIP archive. The modernization
@@ -99,7 +238,9 @@ docker compose up --build
 ```
 
 The dashboard is then available at `http://127.0.0.1:5173`; the FastAPI
-service is at `http://127.0.0.1:8000`. Compose builds the disposable
+service is at `http://127.0.0.1:8000`, the ADK web UI at `http://127.0.0.1:8001`,
+and the A2A planner at `http://127.0.0.1:8002`. On Linux, skip the
+`REFORGE_DOCKER_HOST_RUNS_ROOT` line (see the installation guide above). Compose builds the disposable
 `reforge-sandbox:latest` image before starting the API. The API itself never
 executes target repository code: it asks Docker to run that code in the sandbox.
 For Docker Desktop bind mounts on Windows, Compose uses root *inside the

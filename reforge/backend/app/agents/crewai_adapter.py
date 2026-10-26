@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, ClassVar, TypeVar
@@ -16,8 +17,12 @@ from typing import Any, Callable, ClassVar, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from ..core.config import Settings
+from ..core.input_guard import harden_prompt
 from ..llm import LLMConfigurationError
-from .executor import TokenUsage
+from ..tools.mcp_client import AGENT_READ_TOOLS, stdio_server_params
+from .a2a import A2AClient, consult_planner_tool
+from .executor import TokenUsage, role_key
+from .monitoring import AgentMonitor, crewai_output_guardrail, crewai_step_callback, crewai_task_callback
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -123,6 +128,15 @@ class CrewAIExecutor:
     storage_root: Path | None = None
     component_loader: Callable[[Path | None], CrewAIComponents] = _load_crewai
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Monitoring/guardrail callbacks, MCP tools, and the A2A planner tool.
+    monitor: AgentMonitor | None = None
+    enable_mcp: bool = False
+    a2a_planner_url: str | None = None
+    _workspace: Path | None = field(default=None, init=False, repr=False)
+
+    def set_run_context(self, *, run_id: str, workspace: Path) -> None:
+        """Bind the run's workspace so MCP tools are jailed to it."""
+        self._workspace = Path(workspace)
 
     def __post_init__(self) -> None:
         if self.provider not in {"openai", "anthropic", "ollama", "gemini"}:
@@ -165,32 +179,48 @@ class CrewAIExecutor:
     ) -> ModelT:
         """Run a single non-delegating agent and enforce the output schema."""
         components = self.component_loader(self.storage_root)
+        key = role_key(role)
+        hardened, findings = harden_prompt(prompt)
+        if self.monitor is not None:
+            for finding in findings:
+                self.monitor.record(key, "decision", f"Possible prompt injection in quoted content ({finding.rule}); treated as data", excerpt=finding.excerpt)
+        with ExitStack() as resources:
+            try:
+                tools = self._tools_for(key, resources)
+                llm = components.LLM(**self._llm_kwargs())
+                agent = components.Agent(
+                    role=role,
+                    goal=goal,
+                    backstory=backstory,
+                    llm=llm,
+                    tools=tools,
+                    allow_delegation=False,
+                    verbose=False,
+                    memory=False,
+                    step_callback=crewai_step_callback(self.monitor, key),
+                )
+                task = components.Task(
+                    description=hardened,
+                    expected_output=expected_output,
+                    agent=agent,
+                    output_pydantic=output_model,
+                    callback=crewai_task_callback(self.monitor, key),
+                    guardrail=crewai_output_guardrail(self.monitor, key, output_model),
+                )
+                crew = components.Crew(
+                    agents=[agent],
+                    tasks=[task],
+                    process=components.Process.sequential,
+                    verbose=False,
+                    memory=False,
+                    share_crew=False,
+                )
+                output = crew.kickoff()
+            except Exception as exc:
+                if self.monitor is not None:
+                    self.monitor.record(key, "error", f"CrewAI execution failed: {type(exc).__name__}: {str(exc)[:200]}")
+                raise CrewAIExecutionError(f"CrewAI execution failed: {exc}") from exc
         try:
-            llm = components.LLM(**self._llm_kwargs())
-            agent = components.Agent(
-                role=role,
-                goal=goal,
-                backstory=backstory,
-                llm=llm,
-                allow_delegation=False,
-                verbose=False,
-                memory=False,
-            )
-            task = components.Task(
-                description=prompt,
-                expected_output=expected_output,
-                agent=agent,
-                output_pydantic=output_model,
-            )
-            crew = components.Crew(
-                agents=[agent],
-                tasks=[task],
-                process=components.Process.sequential,
-                verbose=False,
-                memory=False,
-                share_crew=False,
-            )
-            output = crew.kickoff()
             token_usage = getattr(output, "token_usage", None)
             if token_usage is not None:
                 self.usage.add(
@@ -211,8 +241,34 @@ class CrewAIExecutor:
         except Exception as exc:
             raise CrewAIExecutionError(f"CrewAI execution failed: {exc}") from exc
 
+    def _tools_for(self, key: str, resources: ExitStack) -> list[Any]:
+        """MCP read tools for the patch authors; the A2A planner tool for the repair agent.
 
-def build_crewai_executor(settings: Settings) -> CrewAIExecutor:
+        Tool start-up failures are recorded and the agent runs without that
+        tool: tools improve an answer but are never required for one.
+        """
+        tools: list[Any] = []
+        if self.enable_mcp and self._workspace is not None and key in {"transformation", "repair"}:
+            try:
+                from crewai_tools import MCPServerAdapter
+
+                adapter_tools = resources.enter_context(MCPServerAdapter(stdio_server_params(self._workspace)))
+                tools.extend(tool for tool in adapter_tools if getattr(tool, "name", "") in AGENT_READ_TOOLS)
+                if self.monitor is not None:
+                    self.monitor.record(key, "tool_call", f"Connected MCP tools: {', '.join(sorted(getattr(tool, 'name', '?') for tool in tools))}")
+            except Exception as exc:  # missing package, server start failure, protocol error
+                if self.monitor is not None:
+                    self.monitor.record(key, "error", f"MCP tools unavailable: {type(exc).__name__}: {str(exc)[:200]}")
+        if self.a2a_planner_url and key == "repair":
+            try:
+                tools.append(consult_planner_tool(A2AClient(self.a2a_planner_url), self.monitor))
+            except Exception as exc:
+                if self.monitor is not None:
+                    self.monitor.record(key, "error", f"A2A planner tool unavailable: {type(exc).__name__}: {str(exc)[:200]}")
+        return tools
+
+
+def build_crewai_executor(settings: Settings, monitor: AgentMonitor | None = None) -> CrewAIExecutor:
     """Build the actual agent runtime from standard ReForge LLM settings."""
     if not settings.llm_model:
         raise LLMConfigurationError("LLM_MODEL must be configured before starting a CrewAI run")
@@ -220,4 +276,7 @@ def build_crewai_executor(settings: Settings) -> CrewAIExecutor:
         provider=settings.llm_provider,
         model=settings.llm_model,
         temperature=settings.llm_temperature,
+        monitor=monitor,
+        enable_mcp=settings.enable_mcp,
+        a2a_planner_url=settings.a2a_planner_url,
     )

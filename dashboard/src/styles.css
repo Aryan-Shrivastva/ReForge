@@ -250,6 +250,7 @@ input[type="file"].input { padding: 7px 10px; }
 .report { max-height: 75vh; padding: 20px; }
 
 .agents-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.agents-links { display: flex; flex-wrap: wrap; gap: 16px; }
 .agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .agent { display: grid; gap: 2px; padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 0 -1px -1px 0; }
 .agent span:first-child { font-weight: 500; }

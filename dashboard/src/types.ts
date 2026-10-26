@@ -62,6 +62,8 @@ export interface ProjectState {
   report_path: string | null;
   /** Agent role -> runtime ("crewai" | "adk"); absent for runs saved before ADK support. */
   agent_runtime?: Record<string, string>;
+  trace_ids?: string[];
+  trace_url?: string | null;
   /** Mirror of the run's Google ADK session state. */
   agent_session?: Record<string, unknown>;
 }
@@ -122,6 +124,7 @@ export interface RepairAttempt {
 export interface Metrics {
   tokens_in: number;
   tokens_out: number;
+  cost_usd?: number;
   agent_calls: Record<string, number>;
   wall_clock_s: number;
   files_changed: number;
@@ -148,6 +151,7 @@ export interface EvaluationSummary {
     replans: number;
     regressions_introduced: number;
     wall_clock_s: number;
+    cost_usd?: number;
   }>;
 }
 

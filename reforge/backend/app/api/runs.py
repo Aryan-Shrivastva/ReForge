@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.config import Settings
 from ..core.events import RunStateStore, TraceRecorder
+from ..core.input_guard import ensure_clean_user_text
 from ..core.state import FinalStatus, ProjectState, Stage
 from ..core.workflow import DISCOVERY_OBJECTIVE, WorkflowRunner
 from ..evaluation import BenchmarkCatalog, BenchmarkRunner, DEFAULT_ABLATIONS, EvaluationSummary
@@ -61,6 +62,8 @@ class RunCreateRequest(BaseModel):
         # A human may add a specific business goal, but discovery is the default:
         # the analysis agent is responsible for identifying upgrade candidates.
         self.objective = self.objective.strip() or DEFAULT_DISCOVERY_OBJECTIVE
+        if self.objective != DEFAULT_DISCOVERY_OBJECTIVE:
+            ensure_clean_user_text(self.objective, field="objective")
         if sum(bool(source) for source in (self.repo_url, self.workspace_path, self.archive_path)) != 1:
             raise ValueError("provide exactly one repository URL, workspace path, or uploaded archive")
         if self.repo_url is not None and not _REPOSITORY_URL.match(self.repo_url.strip()):
@@ -81,6 +84,13 @@ class PlanReviewRequest(BaseModel):
     # For "approved": the step ids to apply; omitted means every step.
     approved_steps: list[str] | None = None
     feedback: str = Field(default="", max_length=4_000)
+
+    @model_validator(mode="after")
+    def screen_feedback(self) -> "PlanReviewRequest":
+        # Reviewer feedback is passed to the planning agent verbatim, so it is screened like an objective.
+        if self.feedback.strip():
+            ensure_clean_user_text(self.feedback, field="feedback")
+        return self
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -164,6 +174,8 @@ class RunService:
             raise ValueError("uploaded repository must be a .zip archive")
         if len(content) > self.settings.max_upload_bytes:
             raise UploadTooLarge(f"upload exceeds {self.settings.max_upload_bytes} bytes")
+        if objective and objective.strip() and objective.strip() != DEFAULT_DISCOVERY_OBJECTIVE:
+            ensure_clean_user_text(objective.strip(), field="objective")  # before anything is written to disk
         self.settings.with_overrides(config_overrides)
         run_id = uuid.uuid4().hex
         archive = self.runs_root / run_id / "upload.zip"

@@ -69,6 +69,13 @@ class Settings:
     max_concurrent_runs: int = 2
     # Human-in-the-loop: pause every run for plan approval before changing code.
     require_plan_approval: bool = True
+    # MCP: agents and the analysis step reach ReForge's tools through its MCP server.
+    enable_mcp: bool = True
+    # A2A: base URL of the ADK planner's A2A server; when set, planning runs over A2A.
+    a2a_planner_url: str | None = None
+    # Cost estimates: US dollars per one million tokens (0 = not configured / free tier).
+    llm_input_price_per_mtok: float = 0.0
+    llm_output_price_per_mtok: float = 0.0
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -97,6 +104,10 @@ class Settings:
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1")
+        if self.llm_input_price_per_mtok < 0 or self.llm_output_price_per_mtok < 0:
+            raise ValueError("LLM prices must not be negative")
+        if self.a2a_planner_url is not None and not self.a2a_planner_url.startswith(("http://", "https://")):
+            raise ValueError("A2A_PLANNER_URL must be an http(s) URL")
         if not 0 <= self.llm_temperature <= 2:
             raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
         if self.llm_provider not in LLM_PROVIDERS:
@@ -129,11 +140,15 @@ class Settings:
             max_archive_members=_env_int("MAX_ARCHIVE_MEMBERS", 50_000),
             max_concurrent_runs=_env_int("MAX_CONCURRENT_RUNS", 2),
             require_plan_approval=_env_bool("REQUIRE_PLAN_APPROVAL", True),
+            enable_mcp=_env_bool("ENABLE_MCP", True),
+            a2a_planner_url=(os.getenv("A2A_PLANNER_URL") or "").strip() or None,
+            llm_input_price_per_mtok=float(os.getenv("LLM_INPUT_PRICE_PER_MTOK", "0") or 0),
+            llm_output_price_per_mtok=float(os.getenv("LLM_OUTPUT_PRICE_PER_MTOK", "0") or 0),
         )
 
     def with_overrides(self, overrides: dict[str, Any]) -> "Settings":
         """Return validated settings with per-run overrides; unknown keys are rejected."""
-        permitted = {field.name for field in fields(self)}
+        permitted = {field.name for field in fields(self)} - _NOT_OVERRIDABLE
         unknown = set(overrides) - permitted
         if unknown:
             raise ValueError(f"unsupported config overrides: {sorted(unknown)}")
@@ -144,6 +159,10 @@ class Settings:
         values.update(overrides)
         return Settings(**values)
 
+
+# Infrastructure endpoints and prices are deployment settings: a per-run API
+# override must never redirect the backend to another host or database.
+_NOT_OVERRIDABLE = frozenset({"a2a_planner_url", "adk_session_db_url", "llm_input_price_per_mtok", "llm_output_price_per_mtok"})
 
 _FIELD_TYPES: dict[str, tuple[Any, ...]] = {
     "max_repairs": (int,),
@@ -166,6 +185,10 @@ _FIELD_TYPES: dict[str, tuple[Any, ...]] = {
     "max_archive_members": (int,),
     "max_concurrent_runs": (int,),
     "require_plan_approval": (bool,),
+    "enable_mcp": (bool,),
+    "a2a_planner_url": (str, None),
+    "llm_input_price_per_mtok": (float, int),
+    "llm_output_price_per_mtok": (float, int),
 }
 
 

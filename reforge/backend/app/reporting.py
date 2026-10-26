@@ -54,6 +54,7 @@ class ReportGenerator:
             "languages": state.analysis.languages if state.analysis else [],
             "agent_runtime": state.agent_runtime,
             "agent_session": state.agent_session,
+            "observability": {"trace_ids": state.trace_ids, "trace_url": state.trace_url},
             "outcome": {
                 "status": state.final_status.value if state.final_status else "INCOMPLETE",
                 "stage": state.stage.value,
@@ -250,7 +251,22 @@ class ReportGenerator:
         else:
             lines.append("- No repair attempts.")
         lines.append(f"- Replans: {payload['replans']}")
-        lines.extend(["", "## Metrics", "", "```json", json.dumps(payload["metrics"], indent=2, sort_keys=True), "```"])
+        metrics = payload["metrics"]
+        observability = payload.get("observability") or {}
+        lines.extend([
+            "",
+            "## Cost and observability",
+            "",
+            f"- Tokens: {metrics.get('tokens_in', 0)} in / {metrics.get('tokens_out', 0)} out",
+            f"- Estimated LLM cost: ${metrics.get('cost_usd', 0):.4f}"
+            + ("" if metrics.get("cost_usd") else " (set LLM_INPUT_PRICE_PER_MTOK / LLM_OUTPUT_PRICE_PER_MTOK to price tokens)"),
+            f"- Wall-clock time: {metrics.get('wall_clock_s', 0):.1f} s",
+        ])
+        if observability.get("trace_url"):
+            lines.append(f"- LangFuse trace: {observability['trace_url']}")
+        elif observability.get("trace_ids"):
+            lines.append(f"- OpenTelemetry trace ids: {', '.join(f'`{item}`' for item in observability['trace_ids'])}")
+        lines.extend(["", "## Metrics", "", "```json", json.dumps(metrics, indent=2, sort_keys=True), "```"])
         lines.extend(["", "## Unresolved issues", ""])
         if payload["unresolved_issues"]:
             lines.extend(f"- {item}" for item in payload["unresolved_issues"])

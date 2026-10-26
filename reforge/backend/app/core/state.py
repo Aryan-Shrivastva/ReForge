@@ -223,6 +223,8 @@ class Metrics(StrictModel):
     files_changed: int = Field(default=0, ge=0)
     lines_added: int = Field(default=0, ge=0)
     lines_removed: int = Field(default=0, ge=0)
+    # Estimated spend from measured tokens and the configured per-token prices.
+    cost_usd: float = Field(default=0, ge=0)
 
 
 class PlanReview(StrictModel):
@@ -277,6 +279,9 @@ class ProjectState(StrictModel):
     trace: list[TraceEvent] = Field(default_factory=list)
     final_status: FinalStatus | None = None
     report_path: str | None = None
+    # Observability: OpenTelemetry trace ids (one per workflow pass) and a LangFuse link.
+    trace_ids: list[str] = Field(default_factory=list)
+    trace_url: str | None = None
     # Agent role -> runtime ("crewai" or "adk") used for this run.
     agent_runtime: dict[str, str] = Field(default_factory=dict)
     # Mirror of the run's Google ADK session state (empty when no ADK agent runs).

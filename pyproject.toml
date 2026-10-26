@@ -13,13 +13,21 @@ dependencies = [
   # releases no longer pull it in transitively.
   "appdirs>=1.4,<2",
   "crewai[anthropic,google-genai]>=1.12,<2",
+  # MCPServerAdapter: CrewAI agents use ReForge's MCP tool server.
+  "crewai-tools[mcp]>=1.0,<2",
   "docker>=7.0,<8",
   "fastapi>=0.115,<1",
   # Google Agent Development Kit: per-run sessions with state for the
   # analysis/planning agents (AGENT_FRAMEWORK=adk or hybrid).
-  "google-adk>=1.14,<2",
+  # The [a2a] extra adds to_a2a, which serves the ADK planner over the A2A protocol.
+  "google-adk[a2a]>=1.14,<2",
   # ADK's LiteLlm wrapper lets ADK agents use OpenAI, Anthropic, and Ollama.
   "litellm>=1.75.5,<2",
+  # Model Context Protocol: ReForge's tool server (mcp_server.py) and its client.
+  "mcp>=1.10,<2",
+  # Tracing, exported to LangFuse (or any OTLP collector) over OTLP/HTTP.
+  "opentelemetry-sdk>=1.30,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
   "packaging>=24,<27",
   "pydantic>=2.7,<3",
   "python-multipart>=0.0.20,<1",

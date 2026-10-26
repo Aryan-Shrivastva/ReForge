@@ -57,6 +57,7 @@ class RunEvaluation(StrictModel):
     tokens_in: int = Field(ge=0)
     tokens_out: int = Field(ge=0)
     wall_clock_s: float = Field(ge=0)
+    cost_usd: float = Field(default=0, ge=0)
     regressions_introduced: int = Field(ge=0)
 
 
@@ -76,6 +77,8 @@ class EvaluationSummary(StrictModel):
     repair_iterations: MeanSpread | None = None
     replan_count: MeanSpread | None = None
     wall_clock_s: MeanSpread | None = None
+    cost_usd: MeanSpread | None = None
+    tokens_total: MeanSpread | None = None
     regressions_introduced: MeanSpread | None = None
     detection_precision: MeanSpread | None = None
     detection_recall: MeanSpread | None = None
@@ -236,6 +239,7 @@ def evaluate_run(benchmark: BenchmarkDefinition, state: ProjectState) -> RunEval
         tokens_in=state.metrics.tokens_in,
         tokens_out=state.metrics.tokens_out,
         wall_clock_s=state.metrics.wall_clock_s,
+        cost_usd=state.metrics.cost_usd,
         regressions_introduced=regressions,
     )
 
@@ -251,6 +255,8 @@ def summarize_runs(runs: list[RunEvaluation]) -> EvaluationSummary:
         repair_iterations=_spread([float(run.repair_iterations) for run in runs]),
         replan_count=_spread([float(run.replans) for run in runs]),
         wall_clock_s=_spread([run.wall_clock_s for run in runs]),
+        cost_usd=_spread([run.cost_usd for run in runs]),
+        tokens_total=_spread([float(run.tokens_in + run.tokens_out) for run in runs]),
         regressions_introduced=_spread([float(run.regressions_introduced) for run in runs]),
         detection_precision=_spread([run.detection_precision for run in runs if run.detection_precision is not None]),
         detection_recall=_spread([run.detection_recall for run in runs if run.detection_recall is not None]),

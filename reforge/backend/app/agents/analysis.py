@@ -39,6 +39,42 @@ class AnalysisEvidence(StrictModel):
     tests: TestInventory
     node_engine: str | None = None
     package_scripts: dict[str, str] = Field(default_factory=dict)
+    # Latest published versions from PyPI/npm, fetched through the MCP registry tool.
+    registry_versions: list[dict[str, str | bool | None]] = Field(default_factory=list)
+
+
+MAX_REGISTRY_LOOKUPS = 15
+
+
+def registry_lookups(dependencies: list[dict[str, str | None]], tool_client) -> list[dict[str, str | bool | None]]:
+    """Ask the MCP registry tool for each declared Python/npm dependency's latest version.
+
+    Bounded to ``MAX_REGISTRY_LOOKUPS`` packages so a large manifest cannot
+    stall analysis; Gradle coordinates are skipped (no public lookup API).
+    """
+    calls: list[tuple[str, dict[str, str]]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in dependencies:
+        name = str(item.get("name") or "")
+        source = str(item.get("source") or "")
+        ecosystem = "npm" if source.startswith("package.json") else None if "gradle" in source.lower() or ":" in name else "pypi"
+        if not name or ecosystem is None or (ecosystem, name.lower()) in seen:
+            continue
+        seen.add((ecosystem, name.lower()))
+        calls.append(("lookup_latest_version", {"ecosystem": ecosystem, "package": name}))
+        if len(calls) >= MAX_REGISTRY_LOOKUPS:
+            break
+    results = tool_client.call_many(calls)
+    return [
+        {
+            "ecosystem": result.get("ecosystem"),
+            "package": result.get("package"),
+            "latest_version": result.get("latest_version"),
+            "deprecated": result.get("deprecated"),
+            "found": result.get("found"),
+        }
+        for result in results
+    ]
 
 
 _CONFIG_FILE_NAMES = frozenset(
@@ -118,8 +154,13 @@ def _package_entry_points(package: dict[str, object]) -> list[str]:
     return entries
 
 
-def collect_analysis_evidence(workspace: Path, catalog: RuleCatalog) -> AnalysisEvidence:
-    """Collect read-only deterministic inputs for the LLM analysis step."""
+def collect_analysis_evidence(workspace: Path, catalog: RuleCatalog, *, tool_client=None, on_tool_error=None) -> AnalysisEvidence:
+    """Collect read-only deterministic inputs for the LLM analysis step.
+
+    ``tool_client`` (an ``McpToolClient``) adds latest-version facts from the
+    package registries through MCP; a failure there is reported through
+    ``on_tool_error`` and never blocks analysis.
+    """
     repository = RepositoryTools(workspace)
     files = [path for path in repository.list_tree() if not is_skipped(path)]
     languages = detect_languages(files)
@@ -191,7 +232,19 @@ def collect_analysis_evidence(workspace: Path, catalog: RuleCatalog) -> Analysis
         ),
         node_engine=node_engine,
         package_scripts=scripts,
+        registry_versions=_safe_registry_lookups(dependencies, tool_client, on_tool_error),
     )
+
+
+def _safe_registry_lookups(dependencies, tool_client, on_tool_error) -> list[dict[str, str | bool | None]]:
+    if tool_client is None or not dependencies:
+        return []
+    try:
+        return registry_lookups(dependencies, tool_client)
+    except Exception as exc:  # network, MCP server start-up, or validation failure
+        if on_tool_error is not None:
+            on_tool_error(exc)
+        return []
 
 
 class AnalysisAgent(StructuredAgent):

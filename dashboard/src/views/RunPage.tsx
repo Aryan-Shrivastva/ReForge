@@ -315,26 +315,40 @@ function AgentsAndUsage({ state }: { state: ProjectState }) {
   const runtime = Object.entries(state.agent_runtime ?? {});
   const tokens = state.metrics.tokens_in + state.metrics.tokens_out;
   const usesAdk = runtime.some(([, framework]) => framework === "adk");
+  const cost = state.metrics.cost_usd ?? 0;
   return (
     <section className="agents" aria-label="Agents">
       <div className="agents-head">
         <h2 className="steps-title">Agents</h2>
-        {usesAdk && <a className="link" href={adkWebUrl(state.run_id)} target="_blank" rel="noreferrer">Open session in ADK web UI ↗</a>}
+        <div className="agents-links">
+          {state.trace_url && <a className="link" href={state.trace_url} target="_blank" rel="noreferrer">View trace in LangFuse ↗</a>}
+          {usesAdk && <a className="link" href={adkWebUrl(state.run_id)} target="_blank" rel="noreferrer">Open session in ADK web UI ↗</a>}
+        </div>
       </div>
       <div className="agents-grid">
         {runtime.map(([role, framework]) => (
           <div key={role} className="agent">
             <span>{titleCase(role)}</span>
-            <span className="muted">{framework === "adk" ? "Google ADK" : "CrewAI"} · {state.metrics.agent_calls[role] ?? 0} call{(state.metrics.agent_calls[role] ?? 0) === 1 ? "" : "s"}</span>
+            <span className="muted">{frameworkLabel(framework)} · {state.metrics.agent_calls[role] ?? 0} call{(state.metrics.agent_calls[role] ?? 0) === 1 ? "" : "s"}</span>
           </div>
         ))}
         <div className="agent">
           <span>Tokens</span>
           <span className="muted">{compactNumber(tokens)} of {compactNumber(state.budgets.max_tokens ?? 0)} budget</span>
         </div>
+        <div className="agent">
+          <span>Estimated cost</span>
+          <span className="muted">{cost > 0 ? `$${cost.toFixed(4)}` : "Not priced"}</span>
+        </div>
       </div>
     </section>
   );
+}
+
+function frameworkLabel(framework: string): string {
+  if (framework === "adk") return "Google ADK";
+  if (framework === "adk-a2a") return "Google ADK via A2A";
+  return "CrewAI";
 }
 
 /** The adk-web compose service serves the ADK dev UI on port 8001 of the same host. */

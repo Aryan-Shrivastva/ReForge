@@ -25,6 +25,9 @@ services:
       # Persist Google ADK sessions next to run state so session memory
       # survives backend restarts (override in .env to change or disable).
       ADK_SESSION_DB_URL: ${ADK_SESSION_DB_URL:-sqlite:////app/runs/adk_sessions.db}
+      # Planning runs on the ADK planner below, reached agent-to-agent over A2A.
+      # Set A2A_PLANNER_URL= (empty) in .env to plan in-process instead.
+      A2A_PLANNER_URL: ${A2A_PLANNER_URL-http://a2a-planner:8002}
     ports:
       - "8000:8000"
     volumes:
@@ -56,6 +59,26 @@ services:
       - "8001:8001"
     volumes:
       - ./runs:/app/runs
+    depends_on:
+      - backend
+
+  # The ADK planning agent served over the A2A protocol (agent card at
+  # http://127.0.0.1:8002/.well-known/agent-card.json). The backend's planning
+  # role and the CrewAI repair agent's consult_reforge_planner tool call it.
+  a2a-planner:
+    image: reforge-backend
+    pull_policy: never
+    env_file:
+      - .env
+    environment:
+      A2A_PUBLIC_URL: http://a2a-planner:8002
+    command:
+      - uvicorn
+      - reforge.backend.app.a2a_planner:app
+      - --host=0.0.0.0
+      - --port=8002
+    ports:
+      - "8002:8002"
     depends_on:
       - backend
 

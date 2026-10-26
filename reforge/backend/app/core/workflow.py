@@ -10,12 +10,16 @@ from typing import Any, Protocol
 
 from ..agents.analysis import AnalysisAgent, collect_analysis_evidence
 from ..agents.executor import AgentExecutors, TokenUsage, build_agent_executors
+from ..agents.monitoring import AgentMonitor
 from ..agents.planning import PlanningAgent, validate_plan
 from ..agents.repair import RepairAgent
 from ..agents.test_generation import CharacterizationTestGenerator
 from ..agents.testing import TestRunner
 from ..agents.transformation import TransformationAgent
 from ..core.config import Settings
+from ..core.costs import Pricing, estimate_cost_usd
+from ..core import tracing
+from ..core.tracing import configure_tracing
 from ..core.guards import MutationGuards
 from ..core.state import (
     AnalysisReport,
@@ -33,6 +37,7 @@ from ..tools.ast_tools import RuleCatalog, scan_all_deprecated_patterns
 from ..tools.codemod_tools import CodemodTools
 from ..tools.git_tools import GitTools
 from ..tools.languages import is_test_file, iter_source_files
+from ..tools.mcp_client import McpToolClient
 from ..tools.repo_tools import RepositoryTools
 from ..tools.sandbox import DockerSandbox
 from .events import RunStateStore, TraceRecorder
@@ -90,6 +95,8 @@ class WorkflowRunner:
         default_budgets: Budgets | None = None,
         executors: AgentExecutors | None = None,
         require_plan_approval: bool = False,
+        tool_client_factory: Callable[[Path], Any] | None = None,
+        pricing: Pricing | None = None,
     ) -> None:
         self.analysis_agent = analysis_agent
         self.planning_agent = planning_agent
@@ -112,11 +119,15 @@ class WorkflowRunner:
         self.executors = executors
         # Human-in-the-loop: pause at AWAIT_APPROVAL before applying any plan.
         self.require_plan_approval = require_plan_approval
+        # MCP client factory for deterministic tool calls (registry lookups during analysis).
+        self.tool_client_factory = tool_client_factory
+        self.pricing = pricing or Pricing()
 
     @classmethod
     def live(cls, settings: Settings, *, runs_root: Path = Path("runs")) -> "WorkflowRunner":
         """Build the standard Docker-sandboxed workflow on the configured agent runtime(s)."""
-        executors = build_agent_executors(settings)
+        configure_tracing()
+        executors = build_agent_executors(settings, monitor=AgentMonitor())
         catalog = RuleCatalog.from_yaml(
             Path(__file__).resolve().parents[1] / "rules" / "python_deprecations.yaml"
         )
@@ -147,6 +158,8 @@ class WorkflowRunner:
             default_budgets=budgets_from_settings(settings),
             executors=executors,
             require_plan_approval=settings.require_plan_approval,
+            tool_client_factory=(lambda workspace: McpToolClient(workspace)) if settings.enable_mcp else None,
+            pricing=Pricing(settings.llm_input_price_per_mtok, settings.llm_output_price_per_mtok),
         )
 
     def initialize(
@@ -181,6 +194,30 @@ class WorkflowRunner:
 
     def run(self, state: ProjectState) -> ProjectState:
         """Run the full M6 loop: baseline, transform, test, repair, and bounded replan."""
+        # One trace per worker pass; a run resumed after approval adds a second trace to the same session.
+        with tracing.span(
+            "reforge.run",
+            langfuse__session__id=state.run_id,
+            langfuse__trace__name="reforge-run",
+            reforge__run_id=state.run_id,
+            reforge__repository=state.repo_source,
+            reforge__resumed_from=state.stage.value,
+        ) as current:
+            trace_id = tracing.current_trace_id()
+            if trace_id and trace_id not in state.trace_ids:
+                state.trace_ids.append(trace_id)
+                state.trace_url = tracing.trace_url(trace_id) or state.trace_url
+            result = self._run_inner(state)
+            tracing.set_attributes(
+                current,
+                reforge__stage=result.stage.value,
+                reforge__final_status=result.final_status.value if result.final_status else None,
+                reforge__tokens=result.metrics.tokens_in + result.metrics.tokens_out,
+                reforge__cost_usd=result.metrics.cost_usd,
+            )
+            return result
+
+    def _run_inner(self, state: ProjectState) -> ProjectState:
         started = monotonic()
         workspace = Path(state.workspace_path)
         if not workspace.is_dir():
@@ -198,7 +235,7 @@ class WorkflowRunner:
                 self._check_budget(state, started)
                 if state.stage is Stage.ANALYZE:
                     self._record(state, "analysis", "tool_call", "Collecting deterministic repository evidence.")
-                    evidence = collect_analysis_evidence(workspace, self.catalog)
+                    evidence = self._collect_evidence(state, workspace)
                     state.analysis = self._agent_call(
                         state, "analysis", lambda: self.analysis_agent.run(state.objective, evidence)
                     )
@@ -335,26 +372,72 @@ class WorkflowRunner:
         else:
             self._route_test_failure(state)
 
+    def _collect_evidence(self, state: ProjectState, workspace: Path):
+        """Deterministic analysis evidence, plus registry versions fetched through the MCP tool server."""
+        if self.tool_client_factory is None:
+            return collect_analysis_evidence(workspace, self.catalog)
+
+        def on_tool_error(exc: Exception) -> None:
+            self._record(
+                state, "analysis", "error",
+                f"MCP registry lookup failed; analysing without registry versions: {type(exc).__name__}: {exc}",
+            )
+
+        with tracing.span("reforge.mcp.registry_lookups", reforge__run_id=state.run_id):
+            evidence = collect_analysis_evidence(
+                workspace, self.catalog, tool_client=self.tool_client_factory(workspace), on_tool_error=on_tool_error
+            )
+        if evidence.registry_versions:
+            self._record(
+                state, "analysis", "tool_call",
+                f"MCP lookup_latest_version checked {len(evidence.registry_versions)} package(s).",
+                {"packages": [f"{item.get('ecosystem')}:{item.get('package')}" for item in evidence.registry_versions]},
+            )
+        return evidence
+
     def _agent_call(self, state: ProjectState, name: str, call: Callable[[], object]) -> object:
-        self._record(state, name, "start", f"{name} agent started.", {"framework": state.agent_runtime.get(name)})
+        framework = state.agent_runtime.get(name)
+        self._record(state, name, "start", f"{name} agent started.", {"framework": framework})
         state.metrics.agent_calls[name] = state.metrics.agent_calls.get(name, 0) + 1
         last_error: Exception | None = None
-        try:
-            for attempt in range(2):
-                before = self._executor_usage()
-                try:
-                    value = call()
-                    self._record(state, name, "result", f"{name} agent returned validated output.")
-                    return value
-                except Exception as exc:
-                    last_error = exc
-                    self._record(state, name, "error", f"{name} agent attempt {attempt + 1} failed: {exc}")
-                finally:
-                    self._account_tokens(state, before)
-            raise WorkflowError(f"{name} agent failed after one retry: {last_error}")
-        finally:
-            self._sync_agent_sessions(state)
-            self._enforce_token_budget(state)
+        with tracing.span(f"reforge.agent.{name}", reforge__agent=name, reforge__framework=framework) as current:
+            try:
+                for attempt in range(2):
+                    before = self._executor_usage()
+                    try:
+                        value = call()
+                        self._record(state, name, "result", f"{name} agent returned validated output.")
+                        return value
+                    except Exception as exc:
+                        last_error = exc
+                        self._record(state, name, "error", f"{name} agent attempt {attempt + 1} failed: {exc}")
+                    finally:
+                        self._account_tokens(state, before)
+                        self._drain_monitor(state)
+                raise WorkflowError(f"{name} agent failed after one retry: {last_error}")
+            finally:
+                tracing.set_attributes(
+                    current,
+                    reforge__tokens_in=state.metrics.tokens_in,
+                    reforge__tokens_out=state.metrics.tokens_out,
+                    reforge__cost_usd=state.metrics.cost_usd,
+                )
+                self._sync_agent_sessions(state)
+                self._enforce_token_budget(state)
+
+    def _drain_monitor(self, state: ProjectState) -> None:
+        """Copy framework callback events (tool calls, guardrail decisions, errors) into the run trace."""
+        monitor = getattr(self.executors, "monitor", None)
+        if monitor is None:
+            return
+        events = monitor.drain()
+        for event in events:
+            TraceRecorder.add(
+                state, agent=event.agent, kind=event.kind, summary=event.summary,
+                data={**event.data, "source": "callback"},
+            )
+        if events:
+            self.state_store.save(state)
 
     def _executor_usage(self) -> TokenUsage:
         return self.executors.usage() if self.executors is not None else TokenUsage()
@@ -363,6 +446,7 @@ class WorkflowRunner:
         after = self._executor_usage()
         state.metrics.tokens_in += max(after.prompt_tokens - before.prompt_tokens, 0)
         state.metrics.tokens_out += max(after.completion_tokens - before.completion_tokens, 0)
+        state.metrics.cost_usd = estimate_cost_usd(state.metrics.tokens_in, state.metrics.tokens_out, self.pricing)
 
     def _enforce_token_budget(self, state: ProjectState) -> None:
         used = state.metrics.tokens_in + state.metrics.tokens_out
@@ -379,6 +463,8 @@ class WorkflowRunner:
         if self.executors is None:
             return
         state.agent_runtime = self.executors.frameworks()
+        # MCP servers start in the run's workspace; A2A uses the run id as its conversation context.
+        self.executors.set_run_context(run_id=state.run_id, workspace=Path(state.workspace_path))
         for executor in self.executors.session_executors():
             executor.bind_run(state.run_id, self._session_snapshot(state))
         self._sync_agent_sessions(state, push=False)
@@ -687,6 +773,12 @@ class WorkflowRunner:
         ]
 
     def _run_tests(self, state: ProjectState, workspace: Path, phase: str, *, smoke: bool = False) -> TestReport:
+        with tracing.span("reforge.tests", reforge__phase=phase, reforge__smoke=smoke) as current:
+            report = self._run_tests_inner(state, workspace, phase, smoke=smoke)
+            tracing.set_attributes(current, reforge__passed=len(report.passed), reforge__failed=len(report.failed))
+            return report
+
+    def _run_tests_inner(self, state: ProjectState, workspace: Path, phase: str, *, smoke: bool = False) -> TestReport:
         self._record(state, "testing", "start", f"{phase} {'syntax checks' if smoke else 'test run'} started.")
         runner = self.testing_runner_factory(workspace)
         dependency_changed = bool(

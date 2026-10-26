@@ -29,13 +29,17 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from ..core.config import Settings
+from ..core.input_guard import harden_prompt
 from ..llm import LLMConfigurationError
-from .executor import TokenUsage
+from ..tools.mcp_client import AGENT_ANALYSIS_TOOLS, AGENT_READ_TOOLS, stdio_server_params
+from .executor import TokenUsage, role_key
+from .monitoring import AdkCallbacks, AgentMonitor
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -164,6 +168,10 @@ class ADKExecutor:
     # (tests inject a deterministic model; production leaves this unset).
     model_override: Any = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Monitoring/guardrail callbacks and MCP tools.
+    monitor: AgentMonitor | None = None
+    enable_mcp: bool = False
+    _workspace: Path | None = field(default=None, init=False, repr=False)
     _components: ADKComponents | None = field(default=None, init=False, repr=False)
     _session_service: Any = field(default=None, init=False, repr=False)
     _session_id: str | None = field(default=None, init=False)
@@ -178,6 +186,10 @@ class ADKExecutor:
             raise ValueError("temperature must be between 0 and 2")
 
     # -- session lifecycle -------------------------------------------------
+
+    def set_run_context(self, *, run_id: str, workspace: Path) -> None:
+        """Bind the run's workspace so MCP tools are jailed to it."""
+        self._workspace = Path(workspace)
 
     @property
     def session_id(self) -> str | None:
@@ -224,6 +236,10 @@ class ADKExecutor:
         if self._session_id is None:
             # Direct use outside a workflow still gets an isolated session.
             self.bind_run(f"adhoc-{uuid.uuid4().hex}", {})
+        prompt, findings = harden_prompt(prompt)
+        if self.monitor is not None:
+            for finding in findings:
+                self.monitor.record(role_key(role), "decision", f"Possible prompt injection in quoted content ({finding.rule}); treated as data", excerpt=finding.excerpt)
         try:
             text = self._await(self._run_agent(role, goal, backstory, prompt, expected_output))
             value = output_model.model_validate(json.loads(_strip_fence(text)))
@@ -241,6 +257,44 @@ class ADKExecutor:
     async def _run_agent(self, role: str, goal: str, backstory: str, prompt: str, expected_output: str) -> str:
         components = self._get_components()
         name = agent_identifier(role)
+        key = role_key(role)
+        toolset = self._mcp_toolset(key)
+        try:
+            return await self._run_agent_with(components, name, key, toolset, role, goal, backstory, prompt, expected_output)
+        finally:
+            if toolset is not None:
+                try:
+                    await toolset.close()
+                except Exception:  # closing a dead stdio server must not mask the real result
+                    pass
+
+    def _mcp_toolset(self, key: str) -> Any:
+        """ADK ``McpToolset`` for this role: registry/manifest/scanner tools for analysis, code reads for planning."""
+        if not self.enable_mcp or self._workspace is None or key not in {"analysis", "planning"}:
+            return None
+        names = list(AGENT_ANALYSIS_TOOLS if key == "analysis" else AGENT_READ_TOOLS)
+        try:
+            try:
+                from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+            except ImportError:  # older ADK spelling
+                from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset as McpToolset
+            server = stdio_server_params(self._workspace)
+            try:
+                from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+
+                connection: Any = StdioConnectionParams(server_params=server, timeout=30.0)
+            except ImportError:
+                connection = server
+            toolset = McpToolset(connection_params=connection, tool_filter=names)
+        except Exception as exc:
+            if self.monitor is not None:
+                self.monitor.record(key, "error", f"MCP tools unavailable: {type(exc).__name__}: {str(exc)[:200]}")
+            return None
+        if self.monitor is not None:
+            self.monitor.record(key, "tool_call", f"Connected MCP tools: {', '.join(names)}")
+        return toolset
+
+    async def _run_agent_with(self, components: ADKComponents, name: str, key: str, toolset: Any, role: str, goal: str, backstory: str, prompt: str, expected_output: str) -> str:
         agent = components.LlmAgent(
             name=name,
             description=_no_template(goal),
@@ -254,6 +308,10 @@ class ADKExecutor:
             generate_content_config=self._content_config(components),
             disallow_transfer_to_parent=True,
             disallow_transfer_to_peers=True,
+            tools=[toolset] if toolset is not None else [],
+            # Monitoring and guardrail hooks: prompt screening, response checks,
+            # tool-call logging, and tool-return type validation.
+            **AdkCallbacks(self.monitor, key).as_kwargs(),
         )
         runner = components.Runner(agent=agent, app_name=self.app_name, session_service=self._session_service)
         message = components.types.Content(role="user", parts=[components.types.Part(text=prompt)])
@@ -394,7 +452,7 @@ class ADKExecutor:
         return self._loop.run_until_complete(coroutine)
 
 
-def build_adk_executor(settings: Settings) -> ADKExecutor:
+def build_adk_executor(settings: Settings, monitor: AgentMonitor | None = None) -> ADKExecutor:
     """Build the ADK runtime from standard ReForge LLM settings."""
     if not settings.llm_model:
         raise LLMConfigurationError("LLM_MODEL must be configured before starting an ADK run")
@@ -403,4 +461,6 @@ def build_adk_executor(settings: Settings) -> ADKExecutor:
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         session_db_url=settings.adk_session_db_url,
+        monitor=monitor,
+        enable_mcp=settings.enable_mcp,
     )

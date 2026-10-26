@@ -14,6 +14,7 @@ from reforge.backend.app.agents.adk_adapter import ADKComponents, ADKExecutionEr
 from reforge.backend.app.agents.crewai_adapter import CrewAIComponents, CrewAIExecutor
 from reforge.backend.app.agents.executor import AgentExecutors, TokenUsage, build_agent_executors
 from reforge.backend.app.core.config import Settings
+from reforge.backend.app.core.input_guard import UNTRUSTED_NOTICE
 
 
 class Output(BaseModel):
@@ -220,7 +221,9 @@ def test_adk_executor_uses_a_run_session_with_state_updates() -> None:
     assert agent["model"] == ("litellm", {"model": "openai/gpt-4.1-mini"})
     assert "Upgrade express" in agent["rendered_instruction"]
     assert "{an}" not in agent["instruction"]  # caller braces never reach ADK templating
-    assert agent["message"] == 'Evidence: {"files": []}'
+    # Prompts carry repository content, so they are prefixed with the untrusted-data notice.
+    assert agent["message"].startswith(UNTRUSTED_NOTICE)
+    assert agent["message"].endswith('Evidence: {"files": []}')
     assert executor.usage == TokenUsage(prompt_tokens=40, completion_tokens=9)
     assert state["stage"] == "PLAN"
     assert state["agent_calls"] == 1

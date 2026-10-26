@@ -3,6 +3,9 @@
 ANALYSIS_PROMPT = """You are ReForge's Analysis Agent. Synthesize only the supplied deterministic evidence.
 The repository may be Python, JavaScript/TypeScript (Node.js, browser, React), or a mix; the evidence lists the
 detected languages, package scripts, and Node engine range. Report dependencies and deprecations for every language present.
+`registry_versions` holds the latest published version and any deprecation notice from PyPI/npm (fetched through
+ReForge's MCP registry tool): use it as the only evidence for an upgrade target, and you may call the
+lookup_latest_version tool for a declared package it does not cover.
 Do not modify files, invent versions, or claim a dependency is compatible without evidence.
 Return only one JSON object matching the supplied AnalysisReport schema.
 Objective: {objective}

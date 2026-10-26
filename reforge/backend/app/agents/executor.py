@@ -27,6 +27,21 @@ from ..core.config import Settings
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 AGENT_ROLES = ("analysis", "planning", "transformation", "repair", "test_generation")
+
+_ROLE_MARKERS = (
+    ("analyst", "analysis"),
+    ("planner", "planning"),
+    ("transformer", "transformation"),
+    ("repairer", "repair"),
+    ("test generator", "test_generation"),
+    ("characterization", "test_generation"),
+)
+
+
+def role_key(role: str) -> str:
+    """Map an agent's role text to its workflow role name (labels callback events, selects tools)."""
+    lowered = role.lower()
+    return next((key for marker, key in _ROLE_MARKERS if marker in lowered), "agent")
 _ADK_ROLES_IN_HYBRID = frozenset({"analysis", "planning"})
 
 
@@ -85,6 +100,15 @@ class AgentExecutors:
     transformation: AgentExecutor
     repair: AgentExecutor
     test_generation: AgentExecutor
+    # Shared callback sink for every executor (see agents/monitoring.py).
+    monitor: Any = None
+
+    def set_run_context(self, *, run_id: str, workspace: Any) -> None:
+        """Give every executor that uses MCP or A2A the run it is working on."""
+        for executor in self.unique():
+            bind = getattr(executor, "set_run_context", None)
+            if callable(bind):
+                bind(run_id=run_id, workspace=workspace)
 
     def for_role(self, role: str) -> AgentExecutor:
         if role not in AGENT_ROLES:
@@ -118,6 +142,7 @@ def build_agent_executors(
     *,
     crewai_factory: Callable[[Settings], AgentExecutor] | None = None,
     adk_factory: Callable[[Settings], AgentExecutor] | None = None,
+    monitor: Any = None,
 ) -> AgentExecutors:
     """Assign an executor to each role according to ``settings.agent_framework``.
 
@@ -134,20 +159,35 @@ def build_agent_executors(
     def crew_executor() -> AgentExecutor:
         nonlocal crew
         if crew is None:
-            crew = (crewai_factory or build_crewai_executor)(settings)
+            crew = crewai_factory(settings) if crewai_factory else build_crewai_executor(settings, monitor)
         return crew
 
     def adk_executor() -> AgentExecutor:
         nonlocal adk
         if adk is None:
-            adk = (adk_factory or build_adk_executor)(settings)
+            adk = adk_factory(settings) if adk_factory else build_adk_executor(settings, monitor)
         return adk
 
-    def choose(role: str) -> AgentExecutor:
+    def local(role: str) -> AgentExecutor:
         if framework == "crewai":
             return crew_executor()
         if framework == "adk":
             return adk_executor()
         return adk_executor() if role in _ADK_ROLES_IN_HYBRID else crew_executor()
 
-    return AgentExecutors(**{role: choose(role) for role in AGENT_ROLES})
+    planner_over_a2a: AgentExecutor | None = None
+    if settings.a2a_planner_url:
+        # Planning is served by the ADK planner's A2A server (a2a_planner.py),
+        # with the in-process planner as a fallback when that service is down.
+        from .a2a import A2AClient, A2APlannerExecutor
+
+        planner_over_a2a = A2APlannerExecutor(
+            A2AClient(settings.a2a_planner_url), monitor=monitor, fallback=local("planning")
+        )
+
+    def choose(role: str) -> AgentExecutor:
+        if role == "planning" and planner_over_a2a is not None:
+            return planner_over_a2a
+        return local(role)
+
+    return AgentExecutors(**{role: choose(role) for role in AGENT_ROLES}, monitor=monitor)

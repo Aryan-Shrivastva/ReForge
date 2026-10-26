@@ -379,10 +379,30 @@ Everything lives under `./runs` on the host, mounted at `/app/runs` in the conta
 
 CrewAI keeps only throwaway runtime files, in `.reforge-crewai/` inside the backend container. To start fresh, stop the stack and delete `./runs`.
 
+## Update 26 October 2026: MCP, A2A, callbacks, guardrails, observability, cost
+
+This update fills the requirements that were missing or partial. Setup steps are in the README's installation guide. None of this has been run yet: it has to be tested on the Docker machine.
+
+| Requirement | Implementation | Key files |
+|---|---|---|
+| Tool integration via MCP | A FastMCP stdio server with `lookup_latest_version` (PyPI/npm web APIs), `parse_dependencies`, `scan_deprecated_patterns`, `read_file`, `search_code`, scoped to the run workspace. Analysis calls the registry tool deterministically (up to 15 packages; failures are logged and skipped). ADK analysis/planning agents get the tools via `McpToolset`; CrewAI transformation/repair agents get the read tools via `MCPServerAdapter`. | `mcp_server.py`, `tools/mcp_client.py`, `tools/registry.py`, `agents/analysis.py` |
+| A2A between frameworks | The ADK planner is served with `to_a2a` (`a2a-planner` service, port 8002). The orchestrator's planning role sends `message/send` requests with one A2A context per run. The CrewAI repair agent has a `consult_reforge_planner` tool. If the service is unreachable, planning falls back in-process and the timeline records it. | `a2a_planner.py`, `agents/a2a.py`, `agents/executor.py` |
+| Monitoring via callbacks | One `AgentMonitor` is attached to CrewAI `step_callback`, `Task.callback`, and `Task.guardrail`, and to ADK `before/after_model` and `before/after_tool` callbacks. Events are drained into the run trace after each agent call (`"source": "callback"`). | `agents/monitoring.py`, adapters, `core/workflow.py` |
+| Guardrails | Regex screening for prompt injection (override, role hijack, jailbreak, prompt exfiltration, fake role markers, guard bypass, secret exfiltration, remote shell) and abuse (profanity, insults, threats). User objectives and reviewer feedback are blocked (422). Agent prompts get an untrusted-data notice, and findings in repository text are flagged. CrewAI `Task.guardrail` makes CrewAI retry schema-invalid output. ADK `after_tool` replaces non-object or oversized tool results. | `core/input_guard.py`, `api/runs.py`, `agents/monitoring.py` |
+| Observability | OpenTelemetry spans for `reforge.run` (LangFuse session = run id), `reforge.agent.<role>`, `reforge.tests`, `reforge.mcp.registry_lookups`, and `a2a.message_send`. ADK's own spans nest underneath. Export goes to LangFuse via OTLP/HTTP with Basic auth, or to any OTLP endpoint. `ProjectState.trace_ids` and `trace_url` are recorded. | `core/tracing.py`, `core/workflow.py` |
+| Cost/time evaluation | `metrics.cost_usd` = tokens × configured price per million tokens. It is shown in the dashboard, `report.md`/`report.json`, the e2e script, and benchmark summaries (`cost_usd`, `tokens_total` mean/spread next to `wall_clock_s`). | `core/costs.py`, `reporting.py`, `evaluation.py` |
+
+New dependencies: `mcp`, `crewai-tools[mcp]`, `google-adk[a2a]`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`. New tests: `test_guardrails_and_observability.py` and `test_mcp_and_a2a.py`.
+
+Library APIs that vary between versions are handled defensively. ADK `McpToolset`/`MCPToolset` and `StdioConnectionParams` have fallbacks, and `to_a2a` is retried without `protocol`. A failure to start an MCP tool is recorded, and the agent then runs without that tool.
+
 ## Known limitations
 
 - JavaScript deprecation rules are line-based regexes, not an AST. They skip comment lines but can still match inside strings or multi-line comments.
 - Characterization-test generation is supported only for Jest and Vitest, not Mocha or `node:test`.
 - `npm test` scripts that wrap the framework (e.g. `cross-env … jest`) run the framework through `npx --no-install`, which drops the wrapper's environment variables.
 - Codemods (pyupgrade, ruff, bump-pydantic) remain Python-only; JavaScript changes are LLM-authored patches checked by the guards.
+- Guardrail screening is pattern-based. It catches common injection and abuse phrasings, not paraphrases; the mutation guards, schema validation, and sandbox remain the real safety boundary.
+- A2A replies carry no token counts, so tokens spent by the remote planner are missing from `metrics` (they are visible in the planner's own LangFuse spans).
+- MCP stdio servers are started per agent call, which adds about a second of start-up each time.
 - ADK sessions hold *advisory* memory. The deterministic `ProjectState` remains the source of truth, and an ADK sync failure is logged but never fails a run.

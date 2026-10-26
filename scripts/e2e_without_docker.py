@@ -231,6 +231,8 @@ def run_benchmark(name: str, settings: Settings, runs_root: Path, discovery: boo
         "llm_seconds": round(sum(call.seconds for call in calls), 1),
         "tokens_in": state.metrics.tokens_in,
         "tokens_out": state.metrics.tokens_out,
+        "cost_usd": state.metrics.cost_usd,
+        "trace_url": state.trace_url,
         "agent_calls": len(calls),
         "agent_call_failures": sum(not call.ok for call in calls),
         "baseline_passing": len(state.baseline_pass_set),
@@ -258,7 +260,9 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"tests: baseline {summary['baseline_passing']} -> final {summary['final_passing']} "
           f"| preservation {summary['behavior_preservation']:.0%} | regressions {summary['regressions_introduced']}")
     print(f"tokens: in {summary['tokens_in']:,} / out {summary['tokens_out']:,} | agent calls {summary['agent_calls']} "
-          f"({summary['agent_call_failures']} failed)")
+          f"({summary['agent_call_failures']} failed) | est. cost ${summary['cost_usd']:.4f}")
+    if summary.get("trace_url"):
+        print(f"trace: {summary['trace_url']}")
     for line in summary["plan"]:
         print(f"  plan  {line}")
     for line in summary["repairs"]:
