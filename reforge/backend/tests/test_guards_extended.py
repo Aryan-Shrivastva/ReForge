@@ -127,3 +127,29 @@ def test_diff_paths_with_spaces_and_git_quoting_are_parsed() -> None:
 def test_backslash_paths_are_rejected() -> None:
     with pytest.raises(GuardViolation, match="unsafe"):
         changed_paths("--- a/..\\evil.py\n+++ b/..\\evil.py\n")
+
+
+def test_moving_dependencies_between_manifests_at_unchanged_versions_is_not_a_rollback() -> None:
+    """CharitEase run fd3abf18: consolidating two package.json files was blocked as a "rollback"."""
+    guards = MutationGuards(prior_dependency_constraints={"ejs": "^3.1.10", "express": "^4.21.1", "nodemon": "^3.1.7"})
+    consolidate = (
+        "--- a/back-end/package.json\n+++ b/back-end/package.json\n@@ -2,5 +2,2 @@\n"
+        '   "dependencies": {\n-    "ejs": "^3.1.10",\n-    "express": "^4.21.1"\n   }\n'
+        "--- a/package.json\n+++ b/package.json\n@@ -10,4 +10,6 @@\n"
+        '   "dependencies": {\n+    "ejs": "^3.1.10",\n+    "express": "^4.21.1",\n     "nodemon": "^3.1.7"\n   }\n'
+    )
+    move_to_dev = (
+        "--- a/package.json\n+++ b/package.json\n@@ -12,3 +12,5 @@\n"
+        '-    "nodemon": "^3.1.7"\n+  },\n+  "devDependencies": {\n+    "nodemon": "^3.1.7"\n'
+    )
+
+    guards.validate_transformation_patch(consolidate, ["package.json", "back-end/package.json"])
+    guards.validate_transformation_patch(move_to_dev, ["package.json"])
+
+
+def test_replacing_an_upgraded_version_with_the_original_is_still_a_rollback() -> None:
+    guards = MutationGuards(prior_dependency_constraints={"express": "^4.21.1"})
+    rollback = 'diff\n--- a/package.json\n+++ b/package.json\n@@ -3 +3 @@\n-    "express": "^5.1.0",\n+    "express": "^4.21.1",\n'
+
+    with pytest.raises(GuardViolation, match="rollback"):
+        guards.validate_repair_patch(rollback)

@@ -49,6 +49,8 @@ _JS_SELECTION_WEAKENING = re.compile(
     r"|\|\|\s*(?:true|exit\s+0)\b|;\s*exit\s+0\b"
 )
 _VITEST_FILTER = re.compile(r"\b(?:exclude|include)\s*:")
+# A version or range such as 1.1.4, ^5.1.0, >=3, ~2.0: the line declares a constraint.
+_VERSION_LIKE = re.compile(r"\d+(?:\.[\dxX*]+)*")
 
 
 def _unquote(path: str) -> str:
@@ -203,17 +205,22 @@ class MutationGuards:
         return name.startswith(("vitest.config.", "vite.config.")) and bool(_VITEST_FILTER.search(added))
 
     def _reject_dependency_rollback(self, unified_diff: str) -> None:
-        """Reject an added line that re-declares a dependency at its prior constraint.
+        """Reject a patch that replaces a dependency's newer constraint with its prior one.
 
-        Both the dependency name and its exact prior constraint must appear on
-        the same added line as whole tokens.  A bare substring match would
-        reject unrelated lines (``2.0`` inside ``2.0.1``).
+        A rollback needs both halves in the same patch: a removed line naming
+        the dependency at some *other* constraint (the upgrade being undone)
+        and an added line naming it at the prior constraint.  Moving or
+        copying a declaration at its unchanged version - consolidating
+        manifests, moving a package to devDependencies - adds the prior
+        constraint without removing a different one, and is not a rollback.
+        Name and constraint are matched as whole tokens on the same line, so
+        ``2.0`` never matches inside ``2.0.1``.
         """
         if self.allow_dependency_rollback_fallback:
             return
-        added_lines = [
-            line[1:] for line in unified_diff.splitlines() if line.startswith("+") and not line.startswith("+++")
-        ]
+        lines = unified_diff.splitlines()
+        added_lines = [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
+        removed_lines = [line[1:] for line in lines if line.startswith("-") and not line.startswith("---")]
         for dependency, old_constraint in self.prior_dependency_constraints.items():
             if not old_constraint:
                 continue
@@ -222,8 +229,12 @@ class MutationGuards:
                 re.IGNORECASE,
             )
             constraint_pattern = re.compile(r"(?<![\w.])" + re.escape(old_constraint) + r"(?![\w.])")
-            for added in added_lines:
-                if name_pattern.search(added) and constraint_pattern.search(added):
-                    raise GuardViolation(
-                        f"patch restores prior dependency constraint for {dependency!r}; rollback fallback is disabled"
-                    )
+            restores_prior = any(name_pattern.search(line) and constraint_pattern.search(line) for line in added_lines)
+            removes_other = any(
+                name_pattern.search(line) and not constraint_pattern.search(line) and _VERSION_LIKE.search(line)
+                for line in removed_lines
+            )
+            if restores_prior and removes_other:
+                raise GuardViolation(
+                    f"patch restores prior dependency constraint for {dependency!r}; rollback fallback is disabled"
+                )

@@ -170,12 +170,20 @@ export function explain(state: ProjectState): Explanation {
     };
   }
   if (status === "PARTIAL") {
+    const failedStep = plan?.steps.find((step) => step.status === "failed");
+    const reason = failedStep ? transformationError(state, failedStep.id) : null;
+    const blocked = plan?.steps.filter((step) => step.status === "skipped").length ?? 0;
+    const why = failedStep
+      ? ` "${failedStep.title}" was rejected${reason ? `: ${reason}` : ""}.${blocked ? ` ${plural(blocked, "later change")} depended on it and ${blocked === 1 ? "was" : "were"} skipped.` : ""}`
+      : "";
     return {
       headline: applied ? `${applied} of ${plural(plan?.steps.length ?? 0, "change")} applied` : "No change could be applied",
-      detail: applied
+      detail: (applied
         ? "The applied changes keep every baseline check passing, but some planned changes could not be applied safely."
-        : "The planned changes could not be applied without breaking the rules ReForge enforces, so the code is unchanged.",
-      nextSteps: ["Open Apply changes to see why each change was skipped.", "Review the applied changes before merging."],
+        : "The code is unchanged.") + why,
+      nextSteps: applied
+        ? ["Review the applied changes before merging.", "Open Apply changes to see why the others were not applied."]
+        : ["Rerun the project to let the agents plan again.", "Open Apply changes for each change's details."],
     };
   }
   return {
@@ -183,4 +191,9 @@ export function explain(state: ProjectState): Explanation {
     detail: lastError ?? "The run stopped before completing.",
     nextSteps: ["Open the failed step below for details.", "The Logs tab has the full event history."],
   };
+}
+
+function transformationError(state: ProjectState, stepId: string): string | null {
+  const event = [...state.trace].reverse().find((item) => item.agent === "transformation" && item.summary.startsWith(`${stepId} `));
+  return typeof event?.data.error === "string" ? event.data.error : null;
 }
