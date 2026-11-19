@@ -22,7 +22,9 @@ dependencies = [
   # The [a2a] extra adds to_a2a, which serves the ADK planner over the A2A protocol.
   "google-adk[a2a]>=1.14,<2",
   # ADK's LiteLlm wrapper lets ADK agents use OpenAI, Anthropic, and Ollama.
-  "litellm>=1.75.5,<2",
+  # LiteLLM 1.106.0+ imports MCP 2.x-only CacheableResult on tool calls, but
+  # ReForge and its agent integrations currently use MCP 1.x.
+  "litellm>=1.75.5,<1.106.0",
   # Model Context Protocol: ReForge's tool server (mcp_server.py) and its client.
   "mcp>=1.10,<2",
   # Tracing, exported to LangFuse (or any OTLP collector) over OTLP/HTTP.

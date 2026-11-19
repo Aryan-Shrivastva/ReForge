@@ -574,33 +574,48 @@ class TestRunner:
             file for file in files
             if not file.startswith("tests/reforge_generated/") and ".min." not in file
         ][:_MAX_SMOKE_FILES]
-        if not files:
+        uses_typescript = self._uses_typescript()
+        if not files and not uses_typescript:
             return TestReport(phase=phase, install_ok=True, duration_s=monotonic() - started)
-        manifest = self.workspace / _SMOKE_MANIFEST
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        # POSIX newlines: the list is read by sh in the sandbox, and a CRLF
-        # file (Windows hosts) would append "\r" to every path.
-        manifest.write_text("\n".join(files) + "\n", encoding="utf-8", newline="\n")
-        script = (
-            f'while IFS= read -r f; do case "$f" in '
-            '*.py) python -c "import ast,sys; ast.parse(open(sys.argv[1],\'rb\').read(), sys.argv[1])" "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
-            '*) node --check "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
-            f'esac; printf \'{_SMOKE_MARKER} %s %s\\n\' "$r" "$f"; done < {_SMOKE_MANIFEST}'
-        )
-        result = self.sandbox.run(["/bin/sh", "-lc", script], phase="run", timeout=self.timeout_s)
         passed: list[str] = []
         failed: list[Failure] = []
-        for line in f"{result.stdout}\n{result.stderr}".splitlines():
-            if not line.startswith(f"{_SMOKE_MARKER} "):
-                continue
-            _, outcome, file = line.split(" ", 2)
-            test_id = f"smoke:syntax:{file}"
-            if outcome == "ok":
-                passed.append(test_id)
+        if files:
+            manifest = self.workspace / _SMOKE_MANIFEST
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            # POSIX newlines: the list is read by sh in the sandbox, and a CRLF
+            # file (Windows hosts) would append "\r" to every path.
+            manifest.write_text("\n".join(files) + "\n", encoding="utf-8", newline="\n")
+            script = (
+                f'while IFS= read -r f; do case "$f" in '
+                '*.py) python -c "import ast,sys; ast.parse(open(sys.argv[1],\'rb\').read(), sys.argv[1])" "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
+                '*) node --check "$f" >/dev/null 2>&1 && r=ok || r=fail;; '
+                f'esac; printf \'{_SMOKE_MARKER} %s %s\\n\' "$r" "$f"; done < {_SMOKE_MANIFEST}'
+            )
+            result = self.sandbox.run(["/bin/sh", "-lc", script], phase="run", timeout=self.timeout_s)
+            for line in f"{result.stdout}\n{result.stderr}".splitlines():
+                if not line.startswith(f"{_SMOKE_MARKER} "):
+                    continue
+                _, outcome, file = line.split(" ", 2)
+                test_id = f"smoke:syntax:{file}"
+                if outcome == "ok":
+                    passed.append(test_id)
+                else:
+                    failed.append(Failure(test_id=test_id, error_type="SyntaxError", message=f"{file} does not parse", traceback_excerpt="", file=file))
+            if result.timed_out:
+                failed.append(self._runner_failure("smoke:syntax", "syntax checks timed out", result))
+        if uses_typescript:
+            # Node cannot parse TypeScript directly. Use the installed compiler
+            # as a project-level syntax/type baseline for TypeScript sources.
+            typecheck = self.sandbox.run(
+                ["/bin/sh", "-lc", "npx --no-install tsc --noEmit --pretty false"],
+                phase="run",
+                timeout=self.timeout_s,
+            )
+            check_id = "smoke:typescript:project"
+            if typecheck.exit_code == 0 and not typecheck.timed_out:
+                passed.append(check_id)
             else:
-                failed.append(Failure(test_id=test_id, error_type="SyntaxError", message=f"{file} does not parse", traceback_excerpt="", file=file))
-        if result.timed_out:
-            failed.append(self._runner_failure("smoke:syntax", "syntax checks timed out", result))
+                failed.append(self._runner_failure(check_id, "TypeScript project check failed", typecheck))
         return TestReport(phase=phase, install_ok=True, passed=passed, failed=failed, duration_s=monotonic() - started)
 
     def _uses_typescript(self) -> bool:

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Tuple
 
 from pydantic import BaseModel, ValidationError
 
@@ -105,7 +105,7 @@ def crewai_task_callback(monitor: AgentMonitor | None, agent: str) -> Callable[[
     return callback
 
 
-def crewai_output_guardrail(monitor: AgentMonitor | None, agent: str, output_model: type[BaseModel]) -> Callable[[Any], tuple[bool, Any]]:
+def crewai_output_guardrail(monitor: AgentMonitor | None, agent: str, output_model: type[BaseModel]) -> Callable[[Any], Tuple[bool, Any]]:
     """``Task.guardrail``: accept only output that validates against the contracted schema.
 
     Returning ``(False, reason)`` makes CrewAI retry the task with the reason,
@@ -113,7 +113,7 @@ def crewai_output_guardrail(monitor: AgentMonitor | None, agent: str, output_mod
     own validation sees it.
     """
 
-    def guardrail(output: Any) -> tuple[bool, Any]:
+    def guardrail(output: Any) -> Tuple[bool, Any]:
         structured = getattr(output, "pydantic", None)
         try:
             if isinstance(structured, output_model):
