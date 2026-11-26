@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { ProjectState } from "./types";
 import { message, repoName } from "./lib/format";
@@ -29,6 +29,38 @@ function toHash(route: Route): string {
   return "#/";
 }
 
+/**
+ * Turns a shareable ReForge URL into its public GitHub clone URL.
+ *
+ * This deliberately accepts only the `owner/repository` shape. It means a
+ * visitor can replace `github.com` in a public GitHub repository URL with the
+ * ReForge site host and start a run, without turning arbitrary site paths into
+ * clone requests.
+ */
+function repositoryFromLaunchUrl(location: Location): string | null {
+  const supplied = new URLSearchParams(location.search).get("repo");
+  if (supplied) {
+    try {
+      const url = new URL(supplied);
+      if (url.protocol === "https:" && url.hostname === "github.com") {
+        const parts = url.pathname.split("/").filter(Boolean);
+        if (parts.length === 2 && /^[A-Za-z0-9_.-]+$/.test(parts[0]) && /^[A-Za-z0-9_.-]+(?:\.git)?$/.test(parts[1])) {
+          return `https://github.com/${parts[0]}/${parts[1].replace(/\.git$/, "")}.git`;
+        }
+      }
+    } catch {
+      // Invalid launch URLs are left on the normal dashboard page.
+    }
+    return null;
+  }
+
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts.length !== 2 || parts[0] === "runs" || parts[0] === "benchmarks") return null;
+  const [owner, repository] = parts;
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+(?:\.git)?$/.test(repository)) return null;
+  return `https://github.com/${owner}/${repository.replace(/\.git$/, "")}.git`;
+}
+
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
   const [runs, setRuns] = useState<ProjectState[]>([]);
@@ -36,6 +68,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const launchedRepository = useRef<string | null>(null);
   const [, setClock] = useState(0);
 
   const navigate = useCallback((next: Route) => {
@@ -146,6 +179,22 @@ export default function App() {
       return false;
     }
   };
+
+  // A URL such as https://sunraku.site/Aryan-Shrivastva/logwrite is a
+  // one-click launcher for the matching public GitHub project. The ref also
+  // prevents React Strict Mode from starting the same repository twice.
+  useEffect(() => {
+    const repository = repositoryFromLaunchUrl(window.location);
+    if (!repository || launchedRepository.current === repository) return;
+    launchedRepository.current = repository;
+    void (async () => {
+      if (await startRun({ repoUrl: repository })) {
+        // Do not leave the launcher path in the address bar: reloading a run
+        // page must not create another run for the same repository.
+        window.history.replaceState(null, "", `/${window.location.hash}`);
+      }
+    })();
+  }, [startRun]);
 
   const cancelRun = async () => {
     if (!selected || !window.confirm("Cancel this run? It stops at its next checkpoint.")) return;

@@ -17,8 +17,6 @@ which the dashboard streams live, and each event is also attached to the
 current OpenTelemetry span for LangFuse.
 """
 
-from __future__ import annotations
-
 import json
 import threading
 from dataclasses import dataclass, field

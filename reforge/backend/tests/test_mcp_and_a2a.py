@@ -68,10 +68,10 @@ def test_pypi_lookup_reads_latest_version_and_inactive_status() -> None:
 
 def test_npm_lookup_handles_scoped_packages_and_deprecation() -> None:
     seen: list[Any] = []
-    opener = json_opener({"/@babel/core/latest": {"version": "7.26.0", "deprecated": "use x"}}, seen)
+    opener = json_opener({"/@babel%2Fcore/latest": {"version": "7.26.0", "deprecated": "use x"}}, seen)
     result = lookup_latest_version("npm", "@babel/core", opener=opener)
     assert result.latest_version == "7.26.0" and result.deprecated == "use x"
-    assert seen[0].full_url == "https://registry.npmjs.org/@babel/core/latest"
+    assert seen[0].full_url == "https://registry.npmjs.org/@babel%2Fcore/latest"
 
 
 def test_missing_package_and_invalid_names() -> None:

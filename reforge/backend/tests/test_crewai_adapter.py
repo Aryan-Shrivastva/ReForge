@@ -56,7 +56,8 @@ def fake_components(_: object) -> CrewAIComponents:
     )
 
 
-def test_executor_builds_a_non_delegating_sequential_crew() -> None:
+def test_executor_builds_a_non_delegating_sequential_crew(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     executor = CrewAIExecutor(
         provider="openai",
         model="openai/gpt-5.6-terra",
@@ -86,7 +87,8 @@ def test_executor_builds_a_non_delegating_sequential_crew() -> None:
     assert FakeCrew.created["memory"] is False
 
 
-def test_executor_passes_temperature_for_models_that_support_it() -> None:
+def test_executor_passes_temperature_for_models_that_support_it(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     executor = CrewAIExecutor(
         provider="openai",
         model="gpt-4o-mini",

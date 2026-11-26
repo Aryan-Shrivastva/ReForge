@@ -92,7 +92,9 @@ def test_cancelling_a_live_run_is_finalized_by_the_worker(tmp_path: Path) -> Non
 
 def test_interrupted_runs_are_recovered_on_startup(tmp_path: Path) -> None:
     store = RunStateStore(tmp_path / "runs")
-    store.save(ProjectState(run_id="stale", repo_source="x", objective="o", workspace_path="w",
+    stale_workspace = tmp_path / "runs" / "stale" / "workspace"
+    stale_workspace.mkdir(parents=True)
+    store.save(ProjectState(run_id="stale", repo_source="x", objective="o", workspace_path=str(stale_workspace),
                             work_branch="reforge/stale", base_commit="", stage=Stage.TEST))
     store.save(ProjectState(run_id="done", repo_source="x", objective="o", workspace_path="w",
                             work_branch="reforge/done", base_commit="", stage=Stage.DONE,
@@ -106,7 +108,31 @@ def test_interrupted_runs_are_recovered_on_startup(tmp_path: Path) -> None:
 
     assert store.load("stale").final_status is FinalStatus.FAILED
     assert "restarted" in store.load("stale").trace[-1].summary
+    assert Path(store.load("stale").report_path or "").is_file()
     assert store.load("done").final_status is FinalStatus.SUCCESS
+
+
+def test_late_worker_failure_writes_a_report_artifact(tmp_path: Path) -> None:
+    runs = service(tmp_path)
+    workspace = tmp_path / "runs" / "late-failure" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    state = ProjectState(
+        run_id="late-failure",
+        repo_source="https://github.com/example/project.git",
+        objective="Modernize",
+        workspace_path=str(workspace),
+        work_branch="reforge/late-failure",
+        base_commit="",
+    )
+    runs.store.save(state)
+
+    runs._finalize(state.run_id, FinalStatus.FAILED, "Resuming the run failed.")
+
+    final = runs.store.load(state.run_id)
+    assert final.final_status is FinalStatus.FAILED
+    assert final.report_path is not None and Path(final.report_path).is_file()
+    assert Path(final.report_path).with_suffix(".json").is_file()
 
 
 def test_invalid_config_overrides_are_rejected_synchronously(tmp_path: Path) -> None:

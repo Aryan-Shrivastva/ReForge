@@ -36,7 +36,7 @@ from ..reporting import ReportGenerator
 from ..tools.ast_tools import RuleCatalog, scan_all_deprecated_patterns
 from ..tools.codemod_tools import CodemodTools
 from ..tools.git_tools import GitTools
-from ..tools.languages import is_test_file, iter_source_files
+from ..tools.languages import detect_js_package_manager, is_test_file, iter_source_files
 from ..tools.mcp_client import McpToolClient
 from ..tools.repo_tools import RepositoryTools
 from ..tools.sandbox import DockerSandbox
@@ -50,6 +50,39 @@ DISCOVERY_OBJECTIVE = (
 MAX_INFERRED_OBJECTIVE_LENGTH = 320
 GENERATED_TEST_PREFIX = "tests/reforge_generated/"
 _TEST_FILE_EXTENSIONS = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".java", ".kt")
+_NON_RETRYABLE_PROVIDER_ERRORS = (
+    "add usage credits",
+    "insufficient_quota",
+    "insufficient quota",
+    "billing_hard_limit",
+    "payment required",
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "incorrect_api_key",
+    "api_key is required",
+    "api key is required",
+    "authenticationerror",
+    "unauthorized",
+    "model_not_found",
+    "model not found",
+    "model_not_available",
+    "do not have access to model",
+    "does not exist or you do not have access",
+)
+
+
+def _is_non_retryable_provider_error(error: Exception) -> bool:
+    """Identify provider rejections that another identical request cannot fix."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    messages: list[str] = []
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current).lower())
+        current = current.__cause__ or current.__context__
+    combined = " ".join(messages)
+    return any(marker in combined for marker in _NON_RETRYABLE_PROVIDER_ERRORS)
 
 
 class TestingRunner(Protocol):
@@ -411,10 +444,18 @@ class WorkflowRunner:
                     except Exception as exc:
                         last_error = exc
                         self._record(state, name, "error", f"{name} agent attempt {attempt + 1} failed: {exc}")
+                        if _is_non_retryable_provider_error(exc):
+                            self._record(
+                                state,
+                                name,
+                                "decision",
+                                "Stopped retrying because the provider rejected the request for billing, credentials, or model access.",
+                            )
+                            break
                     finally:
                         self._account_tokens(state, before)
                         self._drain_monitor(state)
-                raise WorkflowError(f"{name} agent failed after one retry: {last_error}")
+                raise WorkflowError(f"{name} agent failed after {attempt + 1} attempt(s): {last_error}")
             finally:
                 tracing.set_attributes(
                     current,
@@ -783,8 +824,11 @@ class WorkflowRunner:
         runner = self.testing_runner_factory(workspace)
         dependency_changed = bool(
             phase != "baseline"
-            and state.plan
-            and any(step.status == "applied" and step.kind == "dependency" for step in state.plan.steps)
+            and (
+                state.plan
+                and any(step.status == "applied" and step.kind == "dependency" for step in state.plan.steps)
+                or any("package.json" in repair.files_changed for repair in state.repairs)
+            )
         )
         smoke_checks = smoke or state.smoke_baseline
         report = (
@@ -792,6 +836,26 @@ class WorkflowRunner:
             if smoke_checks
             else runner.run(phase, recreate_venv=dependency_changed)
         )
+        if dependency_changed and report.install_ok and (workspace / "package.json").is_file():
+            git = self.git_factory(workspace)
+            manager = detect_js_package_manager(workspace)
+            lockfile_names = {
+                "npm": ("package-lock.json", "npm-shrinkwrap.json"),
+                "pnpm": ("pnpm-lock.yaml",),
+                "yarn": ("yarn.lock",),
+            }[manager]
+            changed_lockfiles = [
+                name for name in lockfile_names
+                if (workspace / name).is_file() and git.has_changes(name)
+            ]
+            if changed_lockfiles:
+                git.commit("Synchronize package lockfile after dependency updates", changed_lockfiles)
+                self._record(
+                    state,
+                    "testing",
+                    "decision",
+                    f"Synchronized and checkpointed lockfile(s): {', '.join(changed_lockfiles)}.",
+                )
         self._record(
             state,
             "testing",

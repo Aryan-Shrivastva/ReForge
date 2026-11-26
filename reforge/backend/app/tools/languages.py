@@ -35,6 +35,10 @@ SKIPPED_DIRECTORIES = frozenset(
         ".nuxt",
         ".turbo",
         ".cache",
+        ".tox",
+        ".nox",
+        "bower_components",
+        "Pods",
     }
 )
 
@@ -73,6 +77,33 @@ def iter_source_files(workspace: Path, extensions: tuple[str, ...]) -> list[Path
 def is_skipped(relative: str) -> bool:
     """Whether a workspace-relative path lies in a generated, vendored, or tool directory."""
     return any(part in SKIPPED_DIRECTORIES for part in PurePosixPath(relative).parts[:-1])
+
+
+_PROMPT_MANIFESTS = frozenset({
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile",
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+})
+
+
+def bounded_file_inventory(files: list[str], limit: int = 1_500) -> list[str]:
+    """Keep prompt inventories useful and bounded for large monorepos."""
+    if len(files) <= limit:
+        return files
+
+    def rank(path: str) -> tuple[int, str]:
+        name = PurePosixPath(path).name
+        if name in _PROMPT_MANIFESTS:
+            priority = 0
+        elif is_test_file(path):
+            priority = 1
+        elif language_for(path) is not None:
+            priority = 2
+        else:
+            priority = 3
+        return priority, path
+
+    return sorted(sorted(files, key=rank)[:limit])
 
 
 def language_for(path: str) -> Language | None:
@@ -202,8 +233,13 @@ def detect_js_test_framework(workspace: Path) -> JsTestFramework | None:
 
 
 def detect_js_package_manager(workspace: Path) -> Literal["npm", "pnpm", "yarn"]:
-    if (workspace / "pnpm-lock.yaml").is_file():
+    package_manager = read_package_json(workspace).get("packageManager")
+    if isinstance(package_manager, str):
+        declared = package_manager.split("@", 1)[0].lower()
+        if declared in {"npm", "pnpm", "yarn"}:
+            return declared  # type: ignore[return-value]
+    if (workspace / "pnpm-lock.yaml").is_file() or (workspace / "pnpm-workspace.yaml").is_file():
         return "pnpm"
-    if (workspace / "yarn.lock").is_file():
+    if (workspace / "yarn.lock").is_file() or (workspace / ".yarnrc.yml").is_file():
         return "yarn"
     return "npm"

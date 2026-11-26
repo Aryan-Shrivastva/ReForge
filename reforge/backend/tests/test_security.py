@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from reforge.backend.app.api.runs import ArchiveError, RunCreateRequest, RunService
+from reforge.backend.app.core.config import Settings
 from reforge.backend.app.tools.git_tools import GitTools
 from reforge.backend.app.tools.safe_git import SafeGitError, initialize_repository, run_git
 from reforge.backend.app.tools.sandbox import DockerSandbox
@@ -166,6 +167,46 @@ def test_repository_urls_are_limited_to_network_transports(url: str) -> None:
 )
 def test_repository_urls_accept_standard_remotes(url: str) -> None:
     assert RunCreateRequest(repo_url=url).repo_url == url
+
+
+def test_public_hosted_mode_accepts_only_public_https_git_sources(tmp_path: Path, monkeypatch) -> None:
+    service = RunService(Settings(public_repositories_only=True), runs_root=tmp_path)
+    monkeypatch.setattr(service, "_start", lambda _run_id, _request: "queued")
+
+    assert service.start(RunCreateRequest(repo_url="https://github.com/org/project.git")) == "queued"
+    for url in (
+        "http://github.com/org/project.git",
+        "https://user:pass@github.com/org/project.git",
+        "https://127.0.0.1/org/project.git",
+        "https://internal.example/org/project.git",
+    ):
+        with pytest.raises(ValueError, match="hosted mode accepts"):
+            service.start(RunCreateRequest(repo_url=url))
+
+    with pytest.raises(ValueError, match="hosted mode accepts"):
+        service.start(RunCreateRequest(workspace_path="/tmp/project"))
+    with pytest.raises(ValueError, match="public Git repositories only"):
+        service.start_upload(objective=None, filename="project.zip", content=b"", config_overrides={})
+
+
+def test_repository_materialization_uses_shallow_clone_and_configured_timeout(tmp_path: Path, monkeypatch) -> None:
+    from reforge.backend.app.api import runs as runs_module
+
+    calls: list[tuple[list[str], int | None]] = []
+
+    def fake_git(args: list[str], *, timeout: int | None = None, **_kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(runs_module, "run_git", fake_git)
+    service = RunService(Settings(git_clone_timeout_s=777), runs_root=tmp_path)
+    workspace = tmp_path / "run" / "workspace"
+    request = RunCreateRequest(repo_url="https://github.com/org/project.git")
+
+    service._materialize(request, workspace)
+
+    assert calls[0][0][3:6] == ["--depth", "1", "--no-recurse-submodules"]
+    assert calls[0][1] == 777
 
 
 def test_sandbox_mounts_git_metadata_read_only(tmp_path: Path) -> None:

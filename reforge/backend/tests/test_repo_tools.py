@@ -8,6 +8,7 @@ from reforge.backend.app.tools.repo_tools import (
     WorkspaceViolation,
     normalise_unified_diff_hunks,
 )
+from reforge.backend.app.tools.languages import bounded_file_inventory
 
 
 FIXTURE_WORKSPACE = Path("reforge/backend/tests/fixtures/dependency_repo")
@@ -33,6 +34,23 @@ def test_list_tree_ignores_node_modules(tmp_path: Path) -> None:
     files = RepositoryTools(tmp_path).list_tree()
 
     assert files == ["src/main.ts"]
+
+
+def test_list_tree_prunes_generated_and_build_trees_recursively(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    for directory in ("build", ".gradle", ".next", "coverage", ".cache"):
+        generated = tmp_path / "module" / directory / "nested"
+        generated.mkdir(parents=True)
+        (generated / "bundle.js").write_text("generated\n", encoding="utf-8")
+
+    assert RepositoryTools(tmp_path).list_tree() == ["src/main.py"]
+
+
+def test_bounded_file_inventory_prioritizes_manifests_and_tests() -> None:
+    files = ["src/000.py", "tests/test_api.py", "package.json", "docs/readme.md", "src/001.py"]
+
+    assert bounded_file_inventory(files, 3) == ["package.json", "src/000.py", "tests/test_api.py"]
 
 
 def test_rejects_workspace_escape() -> None:

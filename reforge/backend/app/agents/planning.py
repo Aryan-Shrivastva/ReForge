@@ -10,6 +10,26 @@ from ..llm import LLMClient
 from .base import StructuredAgent
 from .executor import AgentExecutor
 from .prompts import PLANNING_PROMPT, REPLANNING_PROMPT
+from ..tools.languages import bounded_file_inventory
+
+
+def _compact_analysis(analysis: AnalysisReport) -> dict[str, object]:
+    """Bound evidence in planning prompts; the persisted report remains complete."""
+    payload = analysis.model_dump(mode="json")
+    omitted: dict[str, int] = {}
+    for field, limit in (("dependencies", 250), ("deprecated_patterns", 250), ("affected_files", 1_000), ("config_files", 500)):
+        values = payload[field]
+        if len(values) > limit:
+            payload[field] = values[:limit]
+            omitted[field] = len(values) - limit
+    tests = payload["tests"]
+    test_files = tests["test_files"]
+    if len(test_files) > 1_000:
+        tests["test_files"] = bounded_file_inventory(test_files, 1_000)
+        omitted["test_files"] = len(test_files) - 1_000
+    if omitted:
+        payload["prompt_omitted_counts"] = omitted
+    return payload
 
 
 class PlanValidationError(ValueError):
@@ -73,8 +93,8 @@ class PlanningAgent(StructuredAgent):
     ) -> Plan:
         prompt = PLANNING_PROMPT.format(
             objective=objective,
-            analysis=json.dumps(analysis.model_dump(mode="json")),
-            files=json.dumps(workspace_files),
+            analysis=json.dumps(_compact_analysis(analysis)),
+            files=json.dumps(bounded_file_inventory(workspace_files)),
             schema=json.dumps(Plan.model_json_schema()),
         )
         if reviewer_feedback:
@@ -109,8 +129,8 @@ class PlanningAgent(StructuredAgent):
         """Produce a materially informed plan after repair progress has stopped."""
         prompt = REPLANNING_PROMPT.format(
             objective=objective,
-            analysis=json.dumps(analysis.model_dump(mode="json")),
-            files=json.dumps(workspace_files),
+            analysis=json.dumps(_compact_analysis(analysis)),
+            files=json.dumps(bounded_file_inventory(workspace_files)),
             previous_plan=json.dumps(previous_plan.model_dump(mode="json")),
             repairs=json.dumps([repair.model_dump(mode="json") for repair in repairs]),
             failures=json.dumps(latest_report.model_dump(mode="json")),

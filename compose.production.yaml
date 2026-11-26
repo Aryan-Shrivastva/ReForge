@@ -1,0 +1,23 @@
+# Public server deployment overlay. Host Nginx terminates HTTPS and proxies to
+# the dashboard, which is bound to loopback. API and agent services stay private.
+services:
+  backend:
+    ports: !override []
+    environment:
+      PUBLIC_REPOSITORIES_ONLY: "true"
+      REQUIRE_PLAN_APPROVAL: "true"
+
+  adk-web:
+    ports: !override []
+
+  a2a-planner:
+    ports: !override []
+
+  dashboard:
+    # Host Nginx proxies here. Loopback binding keeps the dashboard private;
+    # the API, ADK UI, and A2A planner remain unpublished.
+    ports: !override
+      - "127.0.0.1:5173:80"
+    build:
+      args:
+        VITE_PUBLIC_REPOSITORIES_ONLY: "true"

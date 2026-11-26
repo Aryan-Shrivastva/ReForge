@@ -84,6 +84,80 @@ changes, since `pyproject.toml` changed. Services and ports:
 Opening the dashboard from another computer means replacing `localhost` with the
 machine's address (for example `http://uni-dev:5173`).
 
+### 3a. Deploy on a Linux server with your own domain
+
+Use this for a Linux server with Nginx installed on the host. It keeps the API,
+ADK UI, and A2A planner off the public network, accepts public HTTPS Git
+repositories only, and serves the dashboard through host Nginx with HTTPS. The
+dashboard has no login prompt in this setup. The backend needs Docker socket
+access to start isolated repository sandboxes, so do not publish its port
+directly.
+
+1. Point your domain's DNS `A` record to the VM's public IPv4 address. Add an
+   `AAAA` record only when the VM has working public IPv6. Allow inbound TCP
+   ports 80 and 443 in the provider firewall and host firewall.
+2. Install Docker Engine and the Compose plugin if needed. Install Nginx and
+   Certbot with its Nginx plugin:
+
+   ```bash
+   sudo apt update
+   sudo apt install nginx certbot python3-certbot-nginx
+   ```
+
+   Clone this repository onto the VM and create your local environment file:
+
+   ```bash
+   git clone <your-ReForge-repository-url> ~/ReForge
+   cd ~/ReForge
+   cp .env.example .env
+   nano .env
+   ```
+
+   Put the LLM provider key in `.env`; keep the file private.
+3. Copy the Nginx site config and replace `sunraku.site` with your domain if
+   needed. Include `www` only if you point that DNS name to the server too:
+
+   ```bash
+   sudo cp deploy/nginx/reforge.conf /etc/nginx/sites-available/reforge
+   sudo nano /etc/nginx/sites-available/reforge
+   sudo ln -sf /etc/nginx/sites-available/reforge /etc/nginx/sites-enabled/reforge
+   ```
+
+4. Build and start ReForge. The dashboard is published only on `127.0.0.1:5173`
+   for the host Nginx; the backend and agent services remain private:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.production.yaml up -d --build --remove-orphans
+   ```
+
+5. Check and reload Nginx, then issue a certificate and enable the HTTP to
+   HTTPS redirect. Omit the `www` domain if you did not create its DNS record:
+
+   ```bash
+   sudo nginx -t && sudo systemctl reload nginx
+   sudo certbot --nginx --redirect -d sunraku.site -d www.sunraku.site
+   ```
+
+6. Open `https://sunraku.site`. The new-run form accepts public HTTPS Git
+   remotes from GitHub, GitLab, Bitbucket, and Codeberg; private remotes, local
+   paths, and ZIP uploads are rejected in this deployment mode.
+7. Check health and logs with:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.production.yaml ps
+   docker compose -f compose.yaml -f compose.production.yaml logs -f backend
+   ```
+
+   Certbot needs the domain to resolve to this VM and ports 80/443 reachable to
+   issue and renew its certificate. Back up `runs/` and `.env`.
+
+To update, pull the new code and repeat the `up -d --build --remove-orphans` command. For large
+repositories, use a VM with enough RAM and disk for the repository, dependency
+installation, and sandbox containers; adjust `SANDBOX_MEM`,
+`SANDBOX_CMD_TIMEOUT_S`, `GIT_CLONE_TIMEOUT_S`, and `MAX_WALL_CLOCK_S` in `.env`.
+The clone now fetches only the latest commit history, and scan/model context
+excludes common generated folders and is bounded for large monorepos.
+
 ### 4. Run the tests (optional, outside Docker)
 
 ```bash
@@ -223,6 +297,26 @@ objective is optional: when it is blank, ReForge directs its analysis agent to
 discover safe modernization opportunities and propose a prioritized plan. A
 specific objective is only additional human guidance, for example when a team
 already knows it needs to upgrade a particular framework.
+
+### One-click public GitHub runs
+
+The public dashboard can launch a public GitHub repository directly from its
+path. Replace `github.com` in a two-part repository URL with the dashboard
+host. For example, this GitHub URL:
+
+```
+https://github.com/Aryan-Shrivastva/logwrite
+```
+
+becomes:
+
+```
+https://sunraku.site/Aryan-Shrivastva/logwrite
+```
+
+Opening that ReForge URL immediately starts a run for the repository and takes
+the visitor to its run page. The equivalent explicit form is
+`https://sunraku.site/?repo=https%3A%2F%2Fgithub.com%2FAryan-Shrivastva%2Flogwrite`.
 
 ## Run the complete stack with Docker Compose
 

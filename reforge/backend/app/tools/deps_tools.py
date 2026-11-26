@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import configparser
 import json
+import os
 import re
 import tomllib
 from collections import defaultdict
@@ -64,13 +65,24 @@ class DependencyParser:
     def _parse_gradle_files(self) -> list[DeclaredDependency]:
         """Read common Gradle dependency notations without running Gradle."""
         dependencies: list[DeclaredDependency] = []
-        ignored = {".git", ".venv", "build", ".gradle"}
-        gradle_files = sorted(
-            path
-            for pattern in ("build.gradle", "build.gradle.kts")
-            for path in self.workspace.rglob(pattern)
-            if not any(part in ignored for part in path.relative_to(self.workspace).parts)
-        )
+        ignored = {
+            ".git", ".venv", "venv", "node_modules", "build", "dist", ".gradle",
+            "coverage", ".next", ".nuxt", ".turbo", ".cache", ".tox", ".nox", "Pods",
+            "bower_components",
+        }
+        gradle_files: list[Path] = []
+        for directory, subdirectories, filenames in os.walk(self.workspace, followlinks=False):
+            subdirectories[:] = sorted(
+                name for name in subdirectories
+                if name not in ignored and not (Path(directory) / name).is_symlink()
+            )
+            gradle_files.extend(
+                Path(directory) / name
+                for name in filenames
+                if name in {"build.gradle", "build.gradle.kts"}
+                and not (Path(directory) / name).is_symlink()
+            )
+        gradle_files.sort()
         for path in gradle_files:
             source = path.relative_to(self.workspace).as_posix()
             text = path.read_text(encoding="utf-8")

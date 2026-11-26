@@ -15,6 +15,7 @@ from ..tools.deps_tools import DependencyParser
 from ..tools.languages import (
     detect_js_test_framework,
     detect_languages,
+    bounded_file_inventory,
     is_js_test_file,
     is_python_test_file,
     is_skipped,
@@ -276,9 +277,33 @@ class AnalysisAgent(StructuredAgent):
             super().__init__(llm, max_retries=max_retries)
 
     def run(self, objective: str, evidence: AnalysisEvidence) -> AnalysisReport:
+        payload = evidence.model_dump(mode="json")
+        omitted: dict[str, int] = {}
+        limits = {
+            "files": 1_500,
+            "dependencies": 250,
+            "deprecated_patterns": 250,
+            "config_files": 500,
+            "entry_points": 250,
+            "registry_versions": 250,
+        }
+        for field, limit in limits.items():
+            values = payload[field]
+            if len(values) > limit:
+                if field == "files":
+                    payload[field] = bounded_file_inventory(values, limit)
+                else:
+                    payload[field] = values[:limit]
+                omitted[field] = len(values) - limit
+        test_files = payload["tests"]["test_files"]
+        if len(test_files) > 1_000:
+            payload["tests"]["test_files"] = bounded_file_inventory(test_files, 1_000)
+            omitted["test_files"] = len(test_files) - 1_000
+        if omitted:
+            payload["omitted_counts"] = omitted
         prompt = ANALYSIS_PROMPT.format(
             objective=objective,
-            evidence=json.dumps(evidence.model_dump(mode="json")),
+            evidence=json.dumps(payload),
             schema=json.dumps(AnalysisReport.model_json_schema()),
         )
         if self.executor is not None:

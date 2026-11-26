@@ -12,6 +12,7 @@ from ..llm import LLMClient
 from ..tools.languages import (
     JS_LIKE_EXTENSIONS,
     detect_js_test_framework,
+    bounded_file_inventory,
     is_skipped,
     is_test_file,
     package_dependency_names,
@@ -80,7 +81,7 @@ class CharacterizationTestGenerator(StructuredAgent):
         if language == "python":
             prompt = TEST_GENERATION_PROMPT.format(
                 objective=objective,
-                files=json.dumps(files),
+                files=json.dumps(bounded_file_inventory(files)),
                 source=json.dumps(self._source(repository, files, (".py",))),
                 previous_failures=failure_context,
                 schema=json.dumps(TestGenerationProposal.model_json_schema()),
@@ -93,7 +94,7 @@ class CharacterizationTestGenerator(StructuredAgent):
                 framework_note=_FRAMEWORK_NOTES[framework or "node"],
                 module_system="ES modules (import/export)" if package.get("type") == "module" else "CommonJS (require/module.exports)",
                 extension=extension,
-                files=json.dumps(files),
+                files=json.dumps(bounded_file_inventory(files)),
                 source=json.dumps(self._source(repository, files, JS_LIKE_EXTENSIONS)),
                 previous_failures=failure_context,
                 schema=json.dumps(TestGenerationProposal.model_json_schema()),

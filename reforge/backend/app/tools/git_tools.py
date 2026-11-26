@@ -47,6 +47,12 @@ class GitTools:
         args = ("diff", "--no-ext-diff", "--no-textconv", revision) if revision else ("diff", "--no-ext-diff", "--no-textconv")
         return self._run(*args)
 
+    def has_changes(self, path: str) -> bool:
+        """Return whether a path is staged, modified, or newly created."""
+        repository = RepositoryTools(self.workspace)
+        relative = repository.resolve(path).relative_to(self.workspace).as_posix()
+        return bool(self._run("status", "--porcelain", "--", relative).strip())
+
     def checkout(self, revision: str) -> None:
         self._run("checkout", revision)
 

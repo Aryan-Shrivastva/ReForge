@@ -90,11 +90,23 @@ class TransformationAgent(StructuredAgent):
         guards: MutationGuards,
     ) -> str:
         files: dict[str, str] = {}
+        remaining = 48_000
+        truncated = False
         for path in step.files:
+            if remaining <= 0:
+                truncated = True
+                break
             try:
-                files[path] = repository.read_file(path)
+                content = repository.read_file(path)
             except FileNotFoundError:
                 files[path] = "<new file: no current contents>"
+                continue
+            if len(content) > remaining:
+                truncated = True
+            files[path] = content[:remaining]
+            remaining -= len(files[path])
+        if truncated:
+            files["__context_note__"] = "Some target file contents were truncated to keep the model request bounded."
         return TRANSFORMATION_PROMPT.format(
             objective=objective,
             step=json.dumps(step.model_dump(mode="json")),

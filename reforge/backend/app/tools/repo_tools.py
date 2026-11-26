@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -83,11 +84,25 @@ class RepositoryTools:
     _IGNORED_DIRECTORIES = {
         ".git",
         ".venv",
+        "venv",
         "node_modules",
         "__pycache__",
         ".mypy_cache",
         ".ruff_cache",
+        ".pytest_cache",
         ".reforge-artifacts",
+        ".gradle",
+        "build",
+        "dist",
+        "coverage",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".cache",
+        ".tox",
+        ".nox",
+        "bower_components",
+        "Pods",
     }
 
     def __init__(self, workspace: Path) -> None:
@@ -108,11 +123,18 @@ class RepositoryTools:
     def list_tree(self) -> list[str]:
         """List source paths deterministically, excluding generated/tool directories."""
         files: list[str] = []
-        for path in self.workspace.rglob("*"):
-            if any(part in self._IGNORED_DIRECTORIES for part in path.relative_to(self.workspace).parts):
-                continue
-            if path.is_file():
-                files.append(path.relative_to(self.workspace).as_posix())
+        for directory, subdirectories, filenames in os.walk(self.workspace, followlinks=False):
+            subdirectories[:] = sorted(
+                name for name in subdirectories
+                if name not in self._IGNORED_DIRECTORIES
+                and not (Path(directory) / name).is_symlink()
+            )
+            base = Path(directory)
+            files.extend(
+                (base / name).relative_to(self.workspace).as_posix()
+                for name in filenames
+                if not (base / name).is_symlink()
+            )
         return sorted(files)
 
     def read_file(self, path: str | Path) -> str:
@@ -125,21 +147,26 @@ class RepositoryTools:
         """Return `path:line:text` matches for a regular expression."""
         expression = re.compile(pattern)
         matches: list[str] = []
-        for path in self.workspace.rglob(glob):
-            if any(part in self._IGNORED_DIRECTORIES for part in path.relative_to(self.workspace).parts):
-                continue
-            if not path.is_file():
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
-                continue
-            relative = path.relative_to(self.workspace).as_posix()
-            matches.extend(
-                f"{relative}:{number}:{line}"
-                for number, line in enumerate(lines, start=1)
-                if expression.search(line)
+        for directory, subdirectories, filenames in os.walk(self.workspace, followlinks=False):
+            subdirectories[:] = sorted(
+                name for name in subdirectories
+                if name not in self._IGNORED_DIRECTORIES
+                and not (Path(directory) / name).is_symlink()
             )
+            for name in filenames:
+                path = Path(directory) / name
+                if path.is_symlink() or not path.match(glob):
+                    continue
+                try:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                relative = path.relative_to(self.workspace).as_posix()
+                matches.extend(
+                    f"{relative}:{number}:{line}"
+                    for number, line in enumerate(lines, start=1)
+                    if expression.search(line)
+                )
         return matches
 
     def write_new_file(self, path: str | Path, content: str) -> Path:

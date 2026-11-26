@@ -637,16 +637,66 @@ class TestRunner:
         manager = detect_js_package_manager(self.workspace)
         if manager == "pnpm":
             # Corepack ships with Node and honours package.json "packageManager".
-            installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --frozen-lockfile"
+            if recreate_dependencies:
+                installer = (
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --lockfile-only "
+                    "--ignore-scripts --no-frozen-lockfile && "
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --frozen-lockfile"
+                )
+            elif (self.workspace / "pnpm-lock.yaml").is_file():
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --frozen-lockfile"
+            else:
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --no-frozen-lockfile"
         elif manager == "yarn":
-            installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --immutable || COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --frozen-lockfile"
-        elif (self.workspace / "package-lock.json").is_file():
+            lock_exists = (self.workspace / "yarn.lock").is_file()
+            if recreate_dependencies and self._yarn_is_berry():
+                installer = (
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --mode=update-lockfile && "
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --immutable"
+                )
+            elif recreate_dependencies:
+                installer = (
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --ignore-scripts --non-interactive && "
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --frozen-lockfile"
+                )
+            elif lock_exists and self._yarn_is_berry():
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --immutable"
+            elif lock_exists:
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --frozen-lockfile"
+            elif self._yarn_is_berry():
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install --no-immutable"
+            else:
+                installer = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn install"
+        elif (self.workspace / "package-lock.json").is_file() or (self.workspace / "npm-shrinkwrap.json").is_file():
             installer = "npm ci --no-audit --no-fund"
+            if recreate_dependencies:
+                # npm ci requires package-lock.json to exactly match the
+                # updated manifest. Regenerate it without running lifecycle
+                # scripts, then install from the resulting frozen lock.
+                installer = (
+                    "npm install --package-lock-only --ignore-scripts --no-audit --no-fund && "
+                    + installer
+                )
         else:
             installer = "npm install --no-audit --no-fund"
         if recreate_dependencies:
             return f"rm -rf node_modules && {installer}"
         return f"if [ ! -d node_modules ]; then {installer}; fi"
+
+    def _yarn_is_berry(self) -> bool:
+        package_manager = read_package_json(self.workspace).get("packageManager")
+        if isinstance(package_manager, str):
+            match = re.match(r"^yarn@(\d+)", package_manager, re.IGNORECASE)
+            if match:
+                return int(match.group(1)) >= 2
+        lockfile = self.workspace / "yarn.lock"
+        if lockfile.is_file():
+            try:
+                if "__metadata:" in lockfile.read_text(encoding="utf-8", errors="replace")[:2_000]:
+                    return True
+            except OSError:
+                pass
+        return (self.workspace / ".yarnrc.yml").is_file()
 
     def _is_node_project(self) -> bool:
         return (self.workspace / "package.json").is_file()

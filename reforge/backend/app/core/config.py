@@ -67,8 +67,12 @@ class Settings:
     max_archive_uncompressed_bytes: int = 1024 * 1024 * 1024
     max_archive_members: int = 50_000
     max_concurrent_runs: int = 2
+    git_clone_timeout_s: int = 900
     # Human-in-the-loop: pause every run for plan approval before changing code.
     require_plan_approval: bool = True
+    # Public deployment mode: accept only unauthenticated HTTPS Git clones from
+    # well-known public hosting services; reject uploads and server-local paths.
+    public_repositories_only: bool = False
     # MCP: agents and the analysis step reach ReForge's tools through its MCP server.
     enable_mcp: bool = True
     # A2A: base URL of the ADK planner's A2A server; when set, planning runs over A2A.
@@ -101,6 +105,7 @@ class Settings:
             "max_archive_uncompressed_bytes",
             "max_archive_members",
             "max_concurrent_runs",
+            "git_clone_timeout_s",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1")
@@ -139,7 +144,9 @@ class Settings:
             max_archive_uncompressed_bytes=_env_int("MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1024 * 1024 * 1024),
             max_archive_members=_env_int("MAX_ARCHIVE_MEMBERS", 50_000),
             max_concurrent_runs=_env_int("MAX_CONCURRENT_RUNS", 2),
+            git_clone_timeout_s=_env_int("GIT_CLONE_TIMEOUT_S", 900),
             require_plan_approval=_env_bool("REQUIRE_PLAN_APPROVAL", True),
+            public_repositories_only=_env_bool("PUBLIC_REPOSITORIES_ONLY", False),
             enable_mcp=_env_bool("ENABLE_MCP", True),
             a2a_planner_url=(os.getenv("A2A_PLANNER_URL") or "").strip() or None,
             llm_input_price_per_mtok=float(os.getenv("LLM_INPUT_PRICE_PER_MTOK", "0") or 0),
@@ -162,7 +169,7 @@ class Settings:
 
 # Infrastructure endpoints and prices are deployment settings: a per-run API
 # override must never redirect the backend to another host or database.
-_NOT_OVERRIDABLE = frozenset({"a2a_planner_url", "adk_session_db_url", "llm_input_price_per_mtok", "llm_output_price_per_mtok"})
+_NOT_OVERRIDABLE = frozenset({"a2a_planner_url", "adk_session_db_url", "git_clone_timeout_s", "public_repositories_only", "llm_input_price_per_mtok", "llm_output_price_per_mtok"})
 
 _FIELD_TYPES: dict[str, tuple[Any, ...]] = {
     "max_repairs": (int,),
@@ -184,7 +191,9 @@ _FIELD_TYPES: dict[str, tuple[Any, ...]] = {
     "max_archive_uncompressed_bytes": (int,),
     "max_archive_members": (int,),
     "max_concurrent_runs": (int,),
+    "git_clone_timeout_s": (int,),
     "require_plan_approval": (bool,),
+    "public_repositories_only": (bool,),
     "enable_mcp": (bool,),
     "a2a_planner_url": (str, None),
     "llm_input_price_per_mtok": (float, int),

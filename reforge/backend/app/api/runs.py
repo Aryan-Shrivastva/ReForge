@@ -11,6 +11,7 @@ import threading
 import tomllib
 import uuid
 import zipfile
+from urllib.parse import urlsplit
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -25,6 +26,8 @@ from ..core.events import RunStateStore, TraceRecorder
 from ..core.input_guard import ensure_clean_user_text
 from ..core.state import FinalStatus, ProjectState, Stage
 from ..core.workflow import DISCOVERY_OBJECTIVE, WorkflowRunner
+from ..reporting import ReportGenerator
+from ..tools.ast_tools import RuleCatalog
 from ..evaluation import BenchmarkCatalog, BenchmarkRunner, DEFAULT_ABLATIONS, EvaluationSummary
 from ..tools.safe_git import initialize_repository, run_git
 
@@ -35,6 +38,25 @@ _UPLOAD_CHUNK = 1024 * 1024
 # and bare paths read the backend's own filesystem, and a leading ``-`` would
 # be parsed as a Git option.
 _REPOSITORY_URL = re.compile(r"^(?:https?://|ssh://|git://)[^\s]+$|^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$")
+_PUBLIC_GIT_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org"})
+
+
+def _public_https_repository(url: str) -> bool:
+    """Accept public Git remotes without credentials or URL tricks."""
+    try:
+        parsed = urlsplit(url.strip())
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return (
+            parsed.scheme == "https"
+            and host in _PUBLIC_GIT_HOSTS
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and len([part for part in parsed.path.split("/") if part]) >= 2
+        )
+    except ValueError:
+        return False
 
 
 class ArchiveError(ValueError):
@@ -152,11 +174,19 @@ class RunService:
                 kind="error",
                 summary="Run was interrupted because the ReForge service restarted before it finished.",
             )
+            self._write_terminal_report(state)
             self.store.save(state)
             recovered.append(state.run_id)
         return recovered
 
     def start(self, request: RunCreateRequest) -> str:
+        if self.settings.public_repositories_only and (
+            request.repo_url is None or not _public_https_repository(request.repo_url)
+        ):
+            raise ValueError(
+                "hosted mode accepts public HTTPS Git repositories from github.com, gitlab.com, "
+                "bitbucket.org, or codeberg.org only"
+            )
         self.settings.with_overrides(request.config_overrides)
         run_id = uuid.uuid4().hex
         return self._start(run_id, request)
@@ -170,6 +200,8 @@ class RunService:
         config_overrides: dict[str, Any],
     ) -> str:
         """Persist a ZIP upload before the background worker safely extracts it."""
+        if self.settings.public_repositories_only:
+            raise ValueError("hosted mode accepts public Git repositories only; ZIP uploads are disabled")
         if not filename.lower().endswith(".zip"):
             raise ValueError("uploaded repository must be a .zip archive")
         if len(content) > self.settings.max_upload_bytes:
@@ -298,6 +330,7 @@ class RunService:
         state.stage = Stage.REPORT
         state.final_status = FinalStatus.ABORTED
         TraceRecorder.add(state, agent="api", kind="decision", summary="Cancellation requested.")
+        self._write_terminal_report(state)
         self.store.save(state)
         return state
 
@@ -404,7 +437,27 @@ class RunService:
             state.stage = Stage.REPORT
             state.final_status = status
             TraceRecorder.add(state, agent="api", kind="error" if status is FinalStatus.FAILED else "decision", summary=summary)
-            self.store.save(state)
+        if not state.report_path:
+            self._write_terminal_report(state)
+        self.store.save(state)
+
+    def _write_terminal_report(self, state: ProjectState) -> None:
+        """Produce report artifacts even when setup or a resumed worker fails late."""
+        try:
+            run_dir = self.runs_root / state.run_id
+            workspace = Path(state.workspace_path).resolve()
+            if workspace.parent != run_dir.resolve():
+                return
+            catalog_path = Path(__file__).resolve().parents[1] / "rules" / "python_deprecations.yaml"
+            artifacts = ReportGenerator(RuleCatalog.from_yaml(catalog_path)).write(state)
+            state.report_path = str(artifacts.markdown)
+        except Exception as exc:
+            TraceRecorder.add(
+                state,
+                agent="reporting",
+                kind="error",
+                summary=f"Final report generation failed: {type(exc).__name__}: {exc}",
+            )
 
     def _note(self, run_id: str, summary: str) -> None:
         try:
@@ -420,6 +473,7 @@ class RunService:
             state.stage = Stage.REPORT
             state.final_status = FinalStatus.ABORTED
             TraceRecorder.add(state, agent="api", kind="decision", summary="Run cancelled before execution started.")
+            self._write_terminal_report(state)
             self.store.save(state)
 
     def _materialize(self, request: RunCreateRequest, workspace: Path) -> None:
@@ -438,8 +492,8 @@ class RunService:
         completed = run_git(
             # Symlinks are checked out as plain files so a repository cannot
             # point workspace paths at the backend's filesystem.
-            ["-c", "core.symlinks=false", "clone", "--no-recurse-submodules", "--", source, str(workspace)],
-            timeout=300,
+            ["-c", "core.symlinks=false", "clone", "--depth", "1", "--no-recurse-submodules", "--", source, str(workspace)],
+            timeout=self.settings.git_clone_timeout_s,
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "git clone failed")
@@ -550,6 +604,7 @@ class RunService:
                 kind="error",
                 summary=f"Run setup failed: {type(exc).__name__}: {exc}",
             )
+            self._write_terminal_report(state)
             self.store.save(state)
 
 
@@ -620,6 +675,8 @@ def build_router(service: RunService, *, benchmark_runner: BenchmarkRunner | Non
     async def create_run(request: Request) -> RunCreated:
         content_type = request.headers.get("content-type", "")
         if content_type.startswith("multipart/form-data"):
+            if service.settings.public_repositories_only:
+                raise HTTPException(status_code=422, detail="hosted mode accepts public Git repositories only; ZIP uploads are disabled")
             declared = request.headers.get("content-length")
             if declared and declared.isdigit() and int(declared) > service.settings.max_upload_bytes + _UPLOAD_CHUNK:
                 raise HTTPException(status_code=413, detail="upload is too large")

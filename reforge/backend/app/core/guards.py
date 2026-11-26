@@ -49,6 +49,9 @@ _JS_SELECTION_WEAKENING = re.compile(
     r"|\|\|\s*(?:true|exit\s+0)\b|;\s*exit\s+0\b"
 )
 _VITEST_FILTER = re.compile(r"\b(?:exclude|include)\s*:")
+_GENERATED_LOCKFILES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+})
 # A version or range such as 1.1.4, ^5.1.0, >=3, ~2.0: the line declares a constraint.
 _VERSION_LIKE = re.compile(r"\d+(?:\.[\dxX*]+)*")
 
@@ -118,6 +121,7 @@ class MutationGuards:
         """Reject protected, weakening, or out-of-scope changes before applying."""
         paths = changed_paths(unified_diff)
         self._reject_protected_and_infrastructure(paths)
+        self._reject_generated_lockfiles(paths)
 
         allowed = {_normalise_path(path) for path in declared_files}
         new_files = _new_file_paths(unified_diff)
@@ -151,6 +155,7 @@ class MutationGuards:
         """Validate a repair without granting it a transformation step's scope."""
         paths = changed_paths(unified_diff)
         self._reject_protected_and_infrastructure(paths)
+        self._reject_generated_lockfiles(paths)
         self._reject_test_weakening(unified_diff)
         self._reject_dependency_rollback(unified_diff)
         self.register_repair_patch(unified_diff)
@@ -163,6 +168,15 @@ class MutationGuards:
         infrastructure = sorted(path for path in paths if is_test_infrastructure(path))
         if infrastructure:
             raise GuardViolation(f"patch touches test files or test infrastructure: {infrastructure}")
+
+    @staticmethod
+    def _reject_generated_lockfiles(paths: set[str]) -> None:
+        lockfiles = sorted(path for path in paths if PurePosixPath(path).name in _GENERATED_LOCKFILES)
+        if lockfiles:
+            raise GuardViolation(
+                "agent patches may not hand-edit generated package-manager lockfiles; "
+                f"ReForge synchronizes npm package-lock.json from package.json: {lockfiles}"
+            )
 
     def _reject_test_weakening(self, unified_diff: str) -> None:
         current_path: str | None = None

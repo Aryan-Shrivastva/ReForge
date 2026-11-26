@@ -10,7 +10,7 @@ from reforge.backend.app.agents.test_generation import (
 )
 from reforge.backend.app.agents.base import AgentOutputValidationError
 from reforge.backend.app.core.guards import GuardViolation, MutationGuards
-from reforge.backend.app.core.state import Plan, PlanStep, TestReport as StateTestReport
+from reforge.backend.app.core.state import Failure, Plan, PlanStep, TestReport as StateTestReport
 
 
 class FakeLLM:
@@ -189,3 +189,37 @@ def test_repair_retries_an_unapplicable_patch_with_current_source_context() -> N
     assert '"legacy.py": "def legacy()' in llm.prompts[0]
     assert "previous repair was rejected" in llm.prompts[1]
     assert "patch does not apply" in llm.prompts[1]
+
+
+def test_repair_source_context_includes_compiler_diagnostic_file() -> None:
+    class CompilerFailureRepository(FakeRepository):
+        def list_tree(self) -> list[str]:
+            return ["package.json", "src/components/BulletEditor.tsx"]
+
+        def read_file(self, path: str) -> str:
+            if path == "src/components/BulletEditor.tsx":
+                return "const filler = 0;\n" * 1_939 + "ref={el => inputRefs.current[item.id] = el}\n"
+            return "{}\n"
+
+    repository = CompilerFailureRepository(Path("."))
+    report = StateTestReport(
+        phase="post_transform",
+        install_ok=True,
+        duration_s=0,
+        failed=[Failure(
+            test_id="<npm-build>",
+            error_type="RunnerError",
+            message="npm build check failed",
+            file="package.json",
+            traceback_excerpt=(
+                "src/components/BulletEditor.tsx(1940,17): error TS2322: "
+                "Type is not assignable to Ref<HTMLInputElement>."
+            ),
+        )],
+    )
+
+    context = RepairAgent._source_context(
+        repository, repair_plan(), report, MutationGuards(), ""
+    )
+
+    assert "ref={el => inputRefs.current[item.id] = el}" in context["src/components/BulletEditor.tsx"]

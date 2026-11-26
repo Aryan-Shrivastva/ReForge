@@ -7,6 +7,7 @@ export interface NewRunInput {
 }
 
 export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClose: () => void; onSubmit: (input: NewRunInput) => Promise<boolean> }) {
+  const publicOnly = import.meta.env.VITE_PUBLIC_REPOSITORIES_ONLY === "true";
   const dialog = useRef<HTMLDialogElement>(null);
   const [source, setSource] = useState<"git" | "zip">("git");
   const [repoUrl, setRepoUrl] = useState("");
@@ -50,10 +51,10 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
         <div className="dialog-body">
           <fieldset className="field">
             <legend>Repository source</legend>
-            <div className="filters">
+            {!publicOnly && <div className="filters">
               <button type="button" className={source === "git" ? "active" : ""} onClick={() => setSource("git")}>Git URL</button>
               <button type="button" className={source === "zip" ? "active" : ""} onClick={() => setSource("zip")}>ZIP archive</button>
-            </div>
+            </div>}
           </fieldset>
           {source === "git" ? (
             <label className="field">
@@ -66,7 +67,7 @@ export function NewRunDialog({ open, onClose, onSubmit }: { open: boolean; onClo
                 autoFocus
                 required
               />
-              <small>HTTPS, SSH, or git@host:path. Public repositories, or private ones the server can access.</small>
+              <small>{publicOnly ? "Public HTTPS repositories only (GitHub, GitLab, Bitbucket, or Codeberg)." : "HTTPS, SSH, or git@host:path. Public repositories, or private ones the server can access."}</small>
             </label>
           ) : (
             <label className="field">
